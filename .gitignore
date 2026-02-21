@@ -6,3 +6,4 @@ build/
 
 # 忽略 build 文件夹内的所有内容（保留空文件夹）
 build/*
+build/

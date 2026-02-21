@@ -1,6 +1,0 @@
-/home/aa/GPT_MTL_ENCODE_SDK/GPT_mtl_encode_sdk-main/build/CMakeFiles/mtl_sdk.dir
-/home/aa/GPT_MTL_ENCODE_SDK/GPT_mtl_encode_sdk-main/build/CMakeFiles/encode_sdk.dir
-/home/aa/GPT_MTL_ENCODE_SDK/GPT_mtl_encode_sdk-main/build/CMakeFiles/st2110_record.dir
-/home/aa/GPT_MTL_ENCODE_SDK/GPT_mtl_encode_sdk-main/build/CMakeFiles/st2110_send.dir
-/home/aa/GPT_MTL_ENCODE_SDK/GPT_mtl_encode_sdk-main/build/CMakeFiles/edit_cache.dir
-/home/aa/GPT_MTL_ENCODE_SDK/GPT_mtl_encode_sdk-main/build/CMakeFiles/rebuild_cache.dir

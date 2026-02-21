@@ -1,2 +1,0 @@
-/usr/bin/ar qc libencode_sdk.a CMakeFiles/encode_sdk.dir/encode_sdk/src/encode_sdk.cpp.o CMakeFiles/encode_sdk.dir/encode_sdk/src/ffmpeg_utils.cpp.o
-/usr/bin/ranlib libencode_sdk.a

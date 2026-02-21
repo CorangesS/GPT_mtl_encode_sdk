@@ -1,2 +1,0 @@
-/usr/bin/ar qc libmtl_sdk.a CMakeFiles/mtl_sdk.dir/mtl_sdk/src/sdp.cpp.o CMakeFiles/mtl_sdk.dir/mtl_sdk/src/mtl_sdk.cpp.o CMakeFiles/mtl_sdk.dir/mtl_sdk/src/mtl_backend_mtl.cpp.o
-/usr/bin/ranlib libmtl_sdk.a
