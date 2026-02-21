@@ -1,0 +1,1 @@
+/usr/bin/c++ CMakeFiles/st2110_record.dir/samples/st2110_record.cpp.o -o st2110_record  libmtl_sdk.a libencode_sdk.a libmtl_sdk.a -lmtl -lrte_eal -lrte_ring -lrte_mempool -lrte_ethdev -lrte_kvargs -lavformat -lavcodec -lavutil -lswscale -lswresample 
