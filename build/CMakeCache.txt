@@ -224,7 +224,7 @@ MTL_ROOT:PATH=/home/aa/Media-Transport-Library
 
 //Use legacy st_init/st_start API names (ON) or newer mtl_init/mtl_start
 // (OFF)
-MTL_SDK_USE_ST_API:BOOL=OFF
+MTL_SDK_USE_ST_API:BOOL=ON
 
 //Build MTL backend implementation (requires Media-Transport-Library
 // headers/libs)

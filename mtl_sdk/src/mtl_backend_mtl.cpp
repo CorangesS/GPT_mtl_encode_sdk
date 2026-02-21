@@ -20,8 +20,7 @@
   - PTP: built-in PTP enable flag MTL_FLAG_PTP_ENABLE and external ptp_get_time_fn citeturn17view0
   - External frame API: st20p_rx with ST20P_RX_FLAG_EXT_FRAME and query_ext_frame callback citeturn6view0
 
-  ⚠️ API names differ slightly between MTL releases (st_* vs mtl_*).
-  This backend supports both via `MTL_SDK_USE_ST_API` compile definition.
+  Current MTL uses mtl_init/mtl_start/mtl_stop; st_init_params was removed.
 */
 
 extern "C" {
@@ -134,7 +133,8 @@ public:
     out = {};
     out.fmt = vf_;
     out.mem_type = MemoryType::HostPtr;
-    out.timestamp_ns = ptp_now_ ? ptp_now_() : 0; // TODO: replace with frame meta PTP time
+    // Use PTP when available; otherwise synthetic timestamp from frame index for monotonic DTS
+    out.timestamp_ns = ptp_now_ ? ptp_now_() : (frame_idx_++ * (int64_t)(1e9 / vf_.fps));
     out.num_planes = 3;  // YUV422PLANAR10LE
     out.planes[0].data = (uint8_t*)frame->addr[0];
     out.planes[0].linesize = (int)frame->linesize[0];
@@ -150,7 +150,16 @@ public:
   void release(VideoFrame& frame) override {
     if (!frame.opaque) return;
     auto* stf = reinterpret_cast<struct st_frame*>(frame.opaque);
-    st20p_rx_put_frame(rx_, stf); // if your MTL version uses a different name, adjust here.
+    // Return buffer index to free_ so query_ext_frame can reuse it.
+    // Without this, free_ is depleted after 8 frames and query_ext_frame returns -1.
+    uint8_t* addr0 = frame.planes[0].data;
+    for (int i = 0; i < frame_cnt_; i++) {
+      if (bufs_[i].y.data() == addr0) {
+        free_.push_back(i);
+        break;
+      }
+    }
+    st20p_rx_put_frame(rx_, stf);
     frame.opaque = nullptr;
   }
 
@@ -200,6 +209,7 @@ private:
   st20p_rx_handle rx_{};
 
   int frame_cnt_{0};
+  int64_t frame_idx_{0};
   std::vector<Buf> bufs_;
   std::vector<int> free_;
   SpscRing<int> ready_;
@@ -397,83 +407,47 @@ public:
   explicit MtlBackend(const MtlSdkConfig& cfg) : cfg_(cfg) {
     if (cfg_.ports.empty()) throw std::runtime_error("Need at least one port");
 
-#ifdef MTL_SDK_USE_ST_API
-    struct st_init_params p;
-    memset(&p, 0, sizeof(p));
-    p.num_ports = (int)cfg_.ports.size();
-    for (int i = 0; i < p.num_ports; i++) {
-      snprintf(p.port[i], ST_PORT_MAX_LEN, "%s", cfg_.ports[i].port.c_str());
-      uint8_t sip[4]; parse_ipv4(cfg_.ports[i].sip, sip);
-      memcpy(p.sip_addr[i], sip, 4);
-    }
-    p.flags = cfg_.bind_numa ? ST_FLAG_BIND_NUMA : 0;
-
-    if (cfg_.ptp_mode == PtpMode::ExternalFn) {
-      if (!cfg_.external_ptp_time_fn) throw std::runtime_error("external_ptp_time_fn missing");
-      ptp_fn_ = cfg_.external_ptp_time_fn;
-      p.ptp_get_time_fn = (uint64_t (*)(void*))default_ptp_get_time;
-      p.priv = &ptp_fn_;
-    }
-    p.tx_queues_cnt[MTL_PORT_P] = cfg_.tx_queues;
-    p.rx_queues_cnt[MTL_PORT_P] = cfg_.rx_queues;
-
-    st_ = st_init(&p);
-    if (!st_) throw std::runtime_error("st_init failed");
-#else
+    // Current MTL uses mtl_init_params (st_init_params was removed in newer MTL)
     struct mtl_init_params p;
     memset(&p, 0, sizeof(p));
-    p.num_ports = (int)cfg_.ports.size();
+    p.num_ports = (uint8_t)cfg_.ports.size();
     for (int i = 0; i < p.num_ports; i++) {
       p.pmd[i] = mtl_pmd_by_port_name(cfg_.ports[i].port.c_str());
       snprintf(p.port[i], MTL_PORT_MAX_LEN, "%s", cfg_.ports[i].port.c_str());
+      p.net_proto[i] = MTL_PROTO_STATIC;
       uint8_t sip[4]; parse_ipv4(cfg_.ports[i].sip, sip);
       memcpy(p.sip_addr[i], sip, 4);
     }
+    p.flags = cfg_.bind_numa ? MTL_FLAG_BIND_NUMA : 0;
     if (cfg_.enable_builtin_ptp) p.flags |= MTL_FLAG_PTP_ENABLE;
     if (cfg_.ptp_mode == PtpMode::ExternalFn) {
       ptp_fn_ = cfg_.external_ptp_time_fn;
       p.ptp_get_time_fn = (uint64_t (*)(void*))default_ptp_get_time;
       p.priv = &ptp_fn_;
     }
+    p.tx_queues_cnt[MTL_PORT_P] = cfg_.tx_queues;
+    p.rx_queues_cnt[MTL_PORT_P] = cfg_.rx_queues;
     st_ = mtl_init(&p);
     if (!st_) throw std::runtime_error("mtl_init failed");
-#endif
   }
 
   ~MtlBackend() override {
     stop();
-#ifdef MTL_SDK_USE_ST_API
-    if (st_) st_uninit(st_);
-#else
     if (st_) mtl_uninit(st_);
-#endif
   }
 
   int start() override {
-#ifdef MTL_SDK_USE_ST_API
-    return st_start(st_);
-#else
     return mtl_start(st_);
-#endif
   }
 
   int stop() override {
-#ifdef MTL_SDK_USE_ST_API
-    return st_stop(st_);
-#else
     return mtl_stop(st_);
-#endif
   }
 
   TimestampNs now_ptp_ns() const override {
-#ifdef MTL_SDK_USE_ST_API
-    // Legacy API doesn't expose read helper; use external fn or 0.
-    if (cfg_.ptp_mode == PtpMode::ExternalFn && cfg_.external_ptp_time_fn) return cfg_.external_ptp_time_fn();
-    return 0;
-#else
-    uint64_t ns = mtl_ptp_read_time(st_);  // new API returns value directly citeturn17view0
-    return (TimestampNs)ns;
-#endif
+    if (cfg_.ptp_mode == PtpMode::ExternalFn && cfg_.external_ptp_time_fn)
+      return cfg_.external_ptp_time_fn();
+    return (TimestampNs)mtl_ptp_read_time(st_);
   }
 
   std::unique_ptr<IMtlVideoRxSession> create_video_rx(const VideoFormat& vf,
