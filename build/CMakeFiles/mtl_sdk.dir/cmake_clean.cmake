@@ -1,6 +1,4 @@
 file(REMOVE_RECURSE
-  "CMakeFiles/mtl_sdk.dir/mtl_sdk/src/mtl_backend_mock.cpp.o"
-  "CMakeFiles/mtl_sdk.dir/mtl_sdk/src/mtl_backend_mock.cpp.o.d"
   "CMakeFiles/mtl_sdk.dir/mtl_sdk/src/mtl_backend_mtl.cpp.o"
   "CMakeFiles/mtl_sdk.dir/mtl_sdk/src/mtl_backend_mtl.cpp.o.d"
   "CMakeFiles/mtl_sdk.dir/mtl_sdk/src/mtl_sdk.cpp.o"

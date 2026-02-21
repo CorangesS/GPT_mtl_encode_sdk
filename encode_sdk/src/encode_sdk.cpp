@@ -71,6 +71,7 @@ public:
   bool push_video(const mtl_sdk::VideoFrame& frame) override {
     if (closed_) return false;
     if (!v_.enc) return false;
+    if (frame.fmt.width <= 0 || frame.fmt.height <= 0) return false;
 
     // Convert timestamp to PTS in video timebase
     if (v_.first_ts_ns == AV_NOPTS_VALUE) v_.first_ts_ns = frame.timestamp_ns;
@@ -84,7 +85,7 @@ public:
     if (src->format != v_.enc->pix_fmt) {
       AVFrame* conv = alloc_video_frame(v_.enc->pix_fmt, v_.enc->width, v_.enc->height);
       sws_scale(sws_.get(),
-                src->data, src->linesize, 0, v_.enc->height,
+                src->data, src->linesize, 0, src->height,
                 conv->data, conv->linesize);
       conv->pts = pts;
       in = conv;
@@ -107,7 +108,7 @@ public:
     if (a_.first_ts_ns == AV_NOPTS_VALUE) a_.first_ts_ns = frame.timestamp_ns;
     int64_t rel_ns = frame.timestamp_ns - a_.first_ts_ns;
 
-    // input: interleaved S16LE in frame.pcm (mock); real ST2110 may be 24-bit
+    // input: interleaved S16LE in frame.pcm; ST2110-30 may use 24-bit
     const int bytes_per_sample = 2;
     const int nb_samples = (int)(frame.pcm.size() / (bytes_per_sample * frame.fmt.channels));
     if (nb_samples <= 0) return false;
@@ -235,54 +236,52 @@ private:
   }
 
   void open_video() {
-    // Pick encoder. Auto tries NVENC then QSV then SW by probing.
-    const char* enc_name = pick_video_encoder(params_.video.codec, params_.video.hw);
-    const AVCodec* codec = avcodec_find_encoder_by_name(enc_name);
-    if (!codec && params_.video.hw == HwAccel::Auto) {
-      // try qsv
-      enc_name = (params_.video.codec == VideoCodec::H264) ? "h264_qsv" : "hevc_qsv";
-      codec = avcodec_find_encoder_by_name(enc_name);
+    // Adaptive: try NVENC -> QSV -> libx264/libx265. avcodec_open2 may fail (e.g. no GPU).
+    const char* enc_names[] = {
+      (params_.video.codec == VideoCodec::H264) ? "h264_nvenc" : "hevc_nvenc",
+      (params_.video.codec == VideoCodec::H264) ? "h264_qsv"   : "hevc_qsv",
+      (params_.video.codec == VideoCodec::H264) ? "libx264"    : "libx265",
+    };
+    int start_idx = 0, try_count = 3;
+    if (params_.video.hw == HwAccel::QSV)      { start_idx = 1; try_count = 1; }
+    if (params_.video.hw == HwAccel::Software) { start_idx = 2; try_count = 1; }
+    if (params_.video.hw == HwAccel::NVENC)    { try_count = 1; }
+
+    const AVCodec* codec = nullptr;
+    const char* chosen_name = nullptr;
+    for (int ii = 0; ii < try_count; ii++) {
+      int i = start_idx + ii;
+      if (i >= 3) break;
+      codec = avcodec_find_encoder_by_name(enc_names[i]);
+      if (!codec) continue;
+      AVCodecContext* ctx = avcodec_alloc_context3(codec);
+      if (!ctx) continue;
+      ctx->width = 1920;
+      ctx->height = 1080;
+      ctx->bit_rate = (int64_t)params_.video.bitrate_kbps * 1000;
+      ctx->gop_size = params_.video.gop;
+      ctx->max_b_frames = 0;
+      ctx->time_base = av_inv_q(AVRational{params_.video.fps_num, params_.video.fps_den});
+      ctx->framerate = AVRational{params_.video.fps_num, params_.video.fps_den};
+      // Use YUV420P for 8-bit H.264; NVENC accepts it and may avoid alignment issues
+      encoder_fmt_ = (params_.video.input_fmt == mtl_sdk::VideoPixFmt::P010) ? AV_PIX_FMT_P010LE : AV_PIX_FMT_YUV420P;
+      ctx->pix_fmt = encoder_fmt_;
+      if (ofmt_->oformat->flags & AVFMT_GLOBALHEADER) ctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+      if (!params_.video.profile.empty()) av_opt_set(ctx->priv_data, "profile", params_.video.profile.c_str(), 0);
+      av_opt_set(ctx->priv_data, "rc", "cbr", 0);
+      if (avcodec_open2(ctx, codec, nullptr) >= 0) {
+        v_.enc = ctx;
+        chosen_name = enc_names[i];
+        break;
+      }
+      avcodec_free_context(&ctx);
     }
-    if (!codec) {
-      codec = avcodec_find_encoder_by_name(sw_fallback_encoder(params_.video.codec));
-    }
-    if (!codec) throw std::runtime_error("No suitable video encoder found in your FFmpeg build");
+    if (!v_.enc) throw std::runtime_error("No video encoder (tried NVENC, QSV, libx264/libx265)");
+
+    std::cerr << "encode_sdk: using " << chosen_name << "\n";
 
     v_.st = avformat_new_stream(ofmt_, nullptr);
     if (!v_.st) throw std::runtime_error("avformat_new_stream(video) failed");
-
-    v_.enc = avcodec_alloc_context3(codec);
-    if (!v_.enc) throw std::runtime_error("avcodec_alloc_context3(video) failed");
-
-    // Expect to be fed width/height from first frame; but set safe defaults.
-    v_.enc->width = 1920;
-    v_.enc->height = 1080;
-
-    v_.enc->bit_rate = (int64_t)params_.video.bitrate_kbps * 1000;
-    v_.enc->gop_size = params_.video.gop;
-    v_.enc->max_b_frames = 2;
-
-    AVRational fr = AVRational{params_.video.fps_num, params_.video.fps_den};
-    v_.enc->time_base = av_inv_q(fr);
-    v_.enc->framerate = fr;
-
-    // Choose encoder pixel format:
-    // - Most hw encoders accept NV12 (8-bit) and/or P010 (10-bit).
-    // - We default to NV12 for maximum compatibility.
-    encoder_fmt_ = (params_.video.input_fmt == mtl_sdk::VideoPixFmt::P010) ? AV_PIX_FMT_P010LE : AV_PIX_FMT_NV12;
-    v_.enc->pix_fmt = encoder_fmt_;
-
-    if (ofmt_->oformat->flags & AVFMT_GLOBALHEADER) v_.enc->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
-
-    // Apply profile if provided (best-effort; encoder-dependent)
-    if (!params_.video.profile.empty()) {
-      av_opt_set(v_.enc->priv_data, "profile", params_.video.profile.c_str(), 0);
-    }
-
-    // Common rate-control knobs (encoder-dependent)
-    av_opt_set(v_.enc->priv_data, "rc", "vbr", 0);
-
-    ff_check(avcodec_open2(v_.enc, codec, nullptr), "avcodec_open2(video)");
     ff_check(avcodec_parameters_from_context(v_.st->codecpar, v_.enc), "avcodec_parameters_from_context(video)");
     v_.st->time_base = v_.enc->time_base;
   }
@@ -330,12 +329,11 @@ private:
   }
 
   AVFrame* wrap_video_frame(const mtl_sdk::VideoFrame& frame) {
-    // Update encoder dimensions on first frame if they differ.
-    if (v_.enc->width != frame.fmt.width || v_.enc->height != frame.fmt.height) {
-      // NOTE: many encoders cannot change resolution mid-stream; in production, segment/reopen.
-      v_.enc->width = frame.fmt.width;
-      v_.enc->height = frame.fmt.height;
-    }
+    // Encoder was opened with fixed dimensions; do NOT modify v_.enc->width/height.
+    // swscale will handle any size mismatch when converting to encoder format.
+    const int w = frame.fmt.width;
+    const int h = frame.fmt.height;
+    if (w <= 0 || h <= 0) throw std::runtime_error("Invalid frame dimensions");
 
     AVFrame* f = av_frame_alloc();
     // Map mtl_sdk::VideoPixFmt -> AVPixelFormat for the source
@@ -367,16 +365,18 @@ private:
       f->linesize[2] = frame.planes[2].linesize;
     }
 
-    // Init sws if conversion needed
+    // Init sws if conversion needed (src dims -> encoder dims)
     if (!sws_ || sws_src_fmt_ != src_fmt || sws_dst_fmt_ != v_.enc->pix_fmt ||
-        sws_w_ != frame.fmt.width || sws_h_ != frame.fmt.height) {
+        sws_w_ != w || sws_h_ != h || sws_dst_w_ != v_.enc->width || sws_dst_h_ != v_.enc->height) {
       sws_src_fmt_ = src_fmt;
       sws_dst_fmt_ = (AVPixelFormat)v_.enc->pix_fmt;
-      sws_w_ = frame.fmt.width;
-      sws_h_ = frame.fmt.height;
+      sws_w_ = w;
+      sws_h_ = h;
+      sws_dst_w_ = v_.enc->width;
+      sws_dst_h_ = v_.enc->height;
 
       SwsContext* sc = sws_getContext(sws_w_, sws_h_, sws_src_fmt_,
-                                      sws_w_, sws_h_, sws_dst_fmt_,
+                                      sws_dst_w_, sws_dst_h_, sws_dst_fmt_,
                                       SWS_BILINEAR, nullptr, nullptr, nullptr);
       if (!sc) throw std::runtime_error("sws_getContext failed");
       sws_.reset(sc);
@@ -390,13 +390,22 @@ private:
     f->format = fmt;
     f->width = w;
     f->height = h;
-    ff_check(av_frame_get_buffer(f, 32), "av_frame_get_buffer(video)");
+    ff_check(av_frame_get_buffer(f, 64), "av_frame_get_buffer(video)");
     ff_check(av_frame_make_writable(f), "av_frame_make_writable(video)");
     return f;
   }
 
   void encode_and_write(StreamCtx& s, AVFrame* frame) {
-    ff_check(avcodec_send_frame(s.enc, frame), "avcodec_send_frame");
+    int ret = avcodec_send_frame(s.enc, frame);
+    if (ret < 0) {
+      if (frame) {
+        std::cerr << "avcodec_send_frame failed: " << ff_err2str(ret)
+                  << " (wh=" << frame->width << "x" << frame->height
+                  << " fmt=" << frame->format << " pts=" << frame->pts
+                  << " linesize[0]=" << frame->linesize[0] << ")\n";
+      }
+      ff_check(ret, "avcodec_send_frame");
+    }
     while (true) {
       AVPacket* pkt = av_packet_alloc();
       int ret = avcodec_receive_packet(s.enc, pkt);
@@ -434,7 +443,7 @@ private:
   std::unique_ptr<SwsContext, SwsDeleter> sws_{};
   AVPixelFormat sws_src_fmt_ = AV_PIX_FMT_NONE;
   AVPixelFormat sws_dst_fmt_ = AV_PIX_FMT_NONE;
-  int sws_w_ = 0, sws_h_ = 0;
+  int sws_w_ = 0, sws_h_ = 0, sws_dst_w_ = 0, sws_dst_h_ = 0;
 
   std::unique_ptr<SwrContext, SwrDeleter> swr_{};
 

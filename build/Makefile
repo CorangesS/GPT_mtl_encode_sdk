@@ -216,30 +216,6 @@ encode_sdk/src/ffmpeg_utils.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/encode_sdk.dir/build.make CMakeFiles/encode_sdk.dir/encode_sdk/src/ffmpeg_utils.cpp.s
 .PHONY : encode_sdk/src/ffmpeg_utils.cpp.s
 
-mtl_sdk/src/mtl_backend_mock.o: mtl_sdk/src/mtl_backend_mock.cpp.o
-.PHONY : mtl_sdk/src/mtl_backend_mock.o
-
-# target to build an object file
-mtl_sdk/src/mtl_backend_mock.cpp.o:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/mtl_sdk.dir/build.make CMakeFiles/mtl_sdk.dir/mtl_sdk/src/mtl_backend_mock.cpp.o
-.PHONY : mtl_sdk/src/mtl_backend_mock.cpp.o
-
-mtl_sdk/src/mtl_backend_mock.i: mtl_sdk/src/mtl_backend_mock.cpp.i
-.PHONY : mtl_sdk/src/mtl_backend_mock.i
-
-# target to preprocess a source file
-mtl_sdk/src/mtl_backend_mock.cpp.i:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/mtl_sdk.dir/build.make CMakeFiles/mtl_sdk.dir/mtl_sdk/src/mtl_backend_mock.cpp.i
-.PHONY : mtl_sdk/src/mtl_backend_mock.cpp.i
-
-mtl_sdk/src/mtl_backend_mock.s: mtl_sdk/src/mtl_backend_mock.cpp.s
-.PHONY : mtl_sdk/src/mtl_backend_mock.s
-
-# target to generate assembly for a file
-mtl_sdk/src/mtl_backend_mock.cpp.s:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/mtl_sdk.dir/build.make CMakeFiles/mtl_sdk.dir/mtl_sdk/src/mtl_backend_mock.cpp.s
-.PHONY : mtl_sdk/src/mtl_backend_mock.cpp.s
-
 mtl_sdk/src/mtl_backend_mtl.o: mtl_sdk/src/mtl_backend_mtl.cpp.o
 .PHONY : mtl_sdk/src/mtl_backend_mtl.o
 
@@ -378,9 +354,6 @@ help:
 	@echo "... encode_sdk/src/ffmpeg_utils.o"
 	@echo "... encode_sdk/src/ffmpeg_utils.i"
 	@echo "... encode_sdk/src/ffmpeg_utils.s"
-	@echo "... mtl_sdk/src/mtl_backend_mock.o"
-	@echo "... mtl_sdk/src/mtl_backend_mock.i"
-	@echo "... mtl_sdk/src/mtl_backend_mock.s"
 	@echo "... mtl_sdk/src/mtl_backend_mtl.o"
 	@echo "... mtl_sdk/src/mtl_backend_mtl.i"
 	@echo "... mtl_sdk/src/mtl_backend_mtl.s"

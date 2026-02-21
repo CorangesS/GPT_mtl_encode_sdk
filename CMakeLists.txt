@@ -4,43 +4,40 @@ project(mtl_encode_sdk LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-option(MTL_SDK_WITH_MTL "Build MTL backend implementation (requires Media-Transport-Library headers/libs)" OFF)
 option(MTL_SDK_USE_ST_API "Use legacy st_init/st_start API names (ON) or newer mtl_init/mtl_start (OFF)" ON)
 
-# When MTL_SDK_WITH_MTL=ON, point to standard MTL install (e.g. -DMTL_ROOT=/home/MTL).
-# MTL typically has include/ and build/ or lib/; DPDK is linked by MTL, set DPDK_ROOT only if link fails.
-set(MTL_ROOT "/home/Media-Transport-Library" CACHE PATH "Root of Media-Transport-Library install (include + lib/build)")
+# MTL is required. Default: /home/aa/Media-Transport-Library.
+# Override via: cmake .. -DMTL_ROOT=/path/to/MTL
+# MTL typically has include/ and build/ or lib/; DPDK is linked by MTL.
+set(MTL_ROOT "/home/aa/Media-Transport-Library" CACHE PATH "Root of Media-Transport-Library (override with -DMTL_ROOT=...)")
 set(DPDK_ROOT "/home/dpdk" CACHE PATH "Optional: root of DPDK install if MTL does not embed it (e.g. /home/DPDK)")
 
-# ---- mtl_sdk ----
+# ---- mtl_sdk (MTL backend only, no mock) ----
 add_library(mtl_sdk STATIC
   mtl_sdk/src/sdp.cpp
   mtl_sdk/src/mtl_sdk.cpp
-  mtl_sdk/src/mtl_backend_mock.cpp
+  mtl_sdk/src/mtl_backend_mtl.cpp
 )
 
+target_compile_definitions(mtl_sdk PRIVATE MTL_SDK_WITH_MTL=1)
 target_include_directories(mtl_sdk PUBLIC mtl_sdk/include)
 
-if(MTL_SDK_WITH_MTL)
-  target_compile_definitions(mtl_sdk PRIVATE MTL_SDK_WITH_MTL=1)
-  target_sources(mtl_sdk PRIVATE mtl_sdk/src/mtl_backend_mtl.cpp)
-  if(NOT MTL_ROOT STREQUAL "")
-    target_include_directories(mtl_sdk PRIVATE ${MTL_ROOT}/include)
-    if(EXISTS "${MTL_ROOT}/build")
-      target_include_directories(mtl_sdk PRIVATE ${MTL_ROOT}/build)
-      target_link_directories(mtl_sdk PRIVATE ${MTL_ROOT}/build)
-    elseif(EXISTS "${MTL_ROOT}/lib")
-      target_include_directories(mtl_sdk PRIVATE ${MTL_ROOT}/lib)
-      target_link_directories(mtl_sdk PRIVATE ${MTL_ROOT}/lib)
-    endif()
-    target_link_libraries(mtl_sdk PRIVATE mtl)
+if(NOT MTL_ROOT STREQUAL "")
+  target_include_directories(mtl_sdk PRIVATE ${MTL_ROOT}/include)
+  if(EXISTS "${MTL_ROOT}/build")
+    target_include_directories(mtl_sdk PRIVATE ${MTL_ROOT}/build)
+    target_link_directories(mtl_sdk PRIVATE ${MTL_ROOT}/build)
+  elseif(EXISTS "${MTL_ROOT}/lib")
+    target_include_directories(mtl_sdk PRIVATE ${MTL_ROOT}/lib)
+    target_link_directories(mtl_sdk PRIVATE ${MTL_ROOT}/lib)
   endif()
+  target_link_libraries(mtl_sdk PRIVATE mtl)
+endif()
   # Optional: only if MTL was built without embedding DPDK and link fails with undefined rte_*.
-  if(DPDK_ROOT AND NOT DPDK_ROOT STREQUAL "")
-    target_link_directories(mtl_sdk PRIVATE ${DPDK_ROOT}/build/lib)
-    # Adjust library names to match your DPDK build (e.g. lib/rte_build/lib/*.a).
-    target_link_libraries(mtl_sdk PRIVATE rte_eal rte_ring rte_mempool rte_ethdev rte_kvargs)
-  endif()
+if(DPDK_ROOT AND NOT DPDK_ROOT STREQUAL "")
+  target_link_directories(mtl_sdk PRIVATE ${DPDK_ROOT}/build/lib)
+  # Adjust library names to match your DPDK build (e.g. lib/rte_build/lib/*.a).
+  target_link_libraries(mtl_sdk PRIVATE rte_eal rte_ring rte_mempool rte_ethdev rte_kvargs)
 endif()
 
 if(MTL_SDK_USE_ST_API)

@@ -100,7 +100,7 @@ void save_sdp_file(const std::string& path, const SdpSession& sdp);
 // ---- Frame memory model ----
 enum class MemoryType {
   HostPtr,     // CPU virtual addresses in addr[]
-  DmaBufFd,    // Linux DMABUF (fd) for zero-copy import (optional; not used by mock)
+  DmaBufFd,    // Linux DMABUF (fd) for zero-copy import (optional)
   CudaDevice,  // CUDA device ptr (future)
 };
 

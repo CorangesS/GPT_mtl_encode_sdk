@@ -7,11 +7,7 @@
 namespace mtl_sdk {
 
 std::unique_ptr<Context> Context::create(const MtlSdkConfig& cfg) {
-#ifdef MTL_SDK_WITH_MTL
   auto backend = create_backend_mtl(cfg);
-#else
-  auto backend = create_backend_mock(cfg);
-#endif
   if (!backend) return nullptr;
   return std::unique_ptr<Context>(new Context(std::move(backend)));
 }

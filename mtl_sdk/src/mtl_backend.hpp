@@ -43,10 +43,6 @@ public:
   virtual std::unique_ptr<IMtlAudioTxSession> create_audio_tx(const AudioFormat& af, const St2110Endpoint& ep) = 0;
 };
 
-std::unique_ptr<IMtlBackend> create_backend_mock(const MtlSdkConfig& cfg);
-
-#ifdef MTL_SDK_WITH_MTL
 std::unique_ptr<IMtlBackend> create_backend_mtl(const MtlSdkConfig& cfg);
-#endif
 
 } // namespace mtl_sdk

@@ -3,6 +3,7 @@
 
 #include <chrono>
 #include <thread>
+#include <functional>
 #include <cstring>
 #include <stdexcept>
 
@@ -65,10 +66,11 @@ static enum st_fps fps_to_st(double fps) {
 class MtlVideoRx final : public IMtlVideoRxSession {
 public:
   MtlVideoRx(mtl_handle mtl, const VideoFormat& vf, const St2110Endpoint& ep,
-             const std::string& port_name, TimestampNs(*ptp_now)())
-      : mtl_(mtl), vf_(vf), ptp_now_(ptp_now), ready_(1024) {
+             const std::string& port_name, std::function<TimestampNs()> ptp_fn)
+      : mtl_(mtl), vf_(vf), ptp_fn_(std::move(ptp_fn)), ready_(1024) {
 
-    // Allocate external frames for YUV422PLANAR10LE: Y, U, V planes
+    // Allocate external frames for YUV422PLANAR10LE: Y, U, V planes.
+    // 32 buffers give headroom when encode lags; 1024 would use ~8.5GB RAM (not recommended).
     frame_cnt_ = 8;
     bufs_.resize(frame_cnt_);
     const size_t y_sz = (size_t)vf_.width * vf_.height * 2;
@@ -134,7 +136,16 @@ public:
     out.fmt = vf_;
     out.mem_type = MemoryType::HostPtr;
     // Use PTP when available; otherwise synthetic timestamp from frame index for monotonic DTS
-    out.timestamp_ns = ptp_now_ ? ptp_now_() : (frame_idx_++ * (int64_t)(1e9 / vf_.fps));
+    if (ptp_fn_ && !ptp_fallback_) {
+      int64_t ptp_ns = ptp_fn_();
+      if (frame_idx_ == 0 && ptp_ns == 0) {
+        ptp_fallback_ = true;  // PTP unavailable, use synthetic
+      }
+      out.timestamp_ns = ptp_fallback_ ? (frame_idx_ * (int64_t)(1e9 / vf_.fps)) : ptp_ns;
+    } else {
+      out.timestamp_ns = frame_idx_ * (int64_t)(1e9 / vf_.fps);
+    }
+    frame_idx_++;
     out.num_planes = 3;  // YUV422PLANAR10LE
     out.planes[0].data = (uint8_t*)frame->addr[0];
     out.planes[0].linesize = (int)frame->linesize[0];
@@ -203,7 +214,8 @@ private:
 
   mtl_handle mtl_{};
   VideoFormat vf_;
-  TimestampNs (*ptp_now_)() = nullptr;
+  std::function<TimestampNs()> ptp_fn_{};
+  bool ptp_fallback_ = false;
 
   st20p_rx_ops ops_{};
   st20p_rx_handle rx_{};
@@ -452,7 +464,11 @@ public:
 
   std::unique_ptr<IMtlVideoRxSession> create_video_rx(const VideoFormat& vf,
                                                       const St2110Endpoint& ep) override {
-    return std::make_unique<MtlVideoRx>(st_, vf, ep, cfg_.ports[0].port, nullptr);
+    std::function<TimestampNs()> ptp_fn;
+    if (cfg_.enable_builtin_ptp) {
+      ptp_fn = [this]() { return now_ptp_ns(); };
+    }
+    return std::make_unique<MtlVideoRx>(st_, vf, ep, cfg_.ports[0].port, std::move(ptp_fn));
   }
 
   std::unique_ptr<IMtlAudioRxSession> create_audio_rx(const AudioFormat& af,

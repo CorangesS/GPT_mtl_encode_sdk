@@ -25,7 +25,7 @@ static void usage(const char* prog) {
             << "  --height <h>             Default: 1080\n"
             << "  --fps <fps>              Default: 59.94\n"
             << "  --duration <sec>         Run for N seconds (default: 10)\n"
-            << "  --mock                   Use mock backend (no real network)\n";
+            << "  --no-ptp                 Disable PTP, use synthetic timestamps (fallback when NIC lacks PTP)\n";
 }
 
 // Convert yuv420p10le (3 planes) to yuv422p10le (3 planes).
@@ -61,7 +61,7 @@ int main(int argc, char** argv) {
   int height = 1080;
   double fps = 59.94;
   int duration_sec = 10;
-  bool use_mock = false;
+  bool use_ptp = true;
 
   for (int i = 1; i < argc; i++) {
     std::string a = argv[i];
@@ -76,7 +76,7 @@ int main(int argc, char** argv) {
     if (a == "--height" && i + 1 < argc) { height = atoi(argv[++i]); continue; }
     if (a == "--fps" && i + 1 < argc) { fps = atof(argv[++i]); continue; }
     if (a == "--duration" && i + 1 < argc) { duration_sec = atoi(argv[++i]); continue; }
-    if (a == "--mock") { use_mock = true; continue; }
+    if (a == "--no-ptp") { use_ptp = false; continue; }
     if (a == "--help" || a == "-h") { usage(argv[0]); return 0; }
   }
 
@@ -84,8 +84,7 @@ int main(int argc, char** argv) {
   cfg.ports.push_back({port_name, sip});
   cfg.tx_queues = 1;
   cfg.rx_queues = 0;
-
-  (void)use_mock;
+  cfg.enable_builtin_ptp = use_ptp;
 
   auto ctx = mtl_sdk::Context::create(cfg);
   if (!ctx) {
@@ -161,9 +160,27 @@ int main(int argc, char** argv) {
 
   auto start = std::chrono::steady_clock::now();
   double frame_interval = 1.0 / fps;
+  const int64_t frame_ns = (int64_t)(1e9 / fps);
+  bool ptp_valid = use_ptp;
+
+  if (!use_ptp) {
+    std::cout << "PTP disabled, using synthetic timestamps\n";
+  }
 
   for (int i = 0; i < total_video_frames; i++) {
-    frame.timestamp_ns = (int64_t)i * (int64_t)(1e9 / fps);
+    if (ptp_valid) {
+      int64_t ptp_ns = ctx->now_ptp_ns();
+      if (i == 0 && ptp_ns == 0) {
+        ptp_valid = false;
+        std::cout << "PTP unavailable (NIC/mode may not support it), falling back to synthetic timestamps\n";
+      }
+      if (ptp_valid) {
+        frame.timestamp_ns = ptp_ns;
+      }
+    }
+    if (!ptp_valid) {
+      frame.timestamp_ns = (int64_t)i * frame_ns;
+    }
 
     if (from_file) {
       if (use_yuv420) {
