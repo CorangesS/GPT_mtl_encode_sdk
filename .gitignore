@@ -7,3 +7,23 @@ build/
 # 忽略 build 文件夹内的所有内容（保留空文件夹）
 build/*
 build/
+
+
+# 构建目录
+build/
+cmake-build-*/
+out/
+Debug/
+Release/
+
+# 编译产物
+*.exe
+*.dll
+*.so
+*.a
+*.o
+*.obj
+
+
+
+build/
