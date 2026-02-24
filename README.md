@@ -146,3 +146,12 @@ python3 routing/scripts/register_node_example.py --heartbeat --interval 10 &
 ```
 
 或使用一体化脚本：`routing/scripts/run_with_nmos.sh`。详见 [docs/EASY_NMOS_IMPLEMENTATION.md](docs/EASY_NMOS_IMPLEMENTATION.md)。
+
+## 九、测试
+
+需求符合性测试见 [tests/README.md](tests/README.md)：
+
+```bash
+cmake --build build -j
+./tests/scripts/run_all_tests.sh
+```

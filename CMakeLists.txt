@@ -81,3 +81,6 @@ target_link_libraries(st2110_record PRIVATE mtl_sdk encode_sdk)
 
 add_executable(st2110_send samples/st2110_send.cpp)
 target_link_libraries(st2110_send PRIVATE mtl_sdk)
+
+# ---- tests ----
+add_subdirectory(tests)
