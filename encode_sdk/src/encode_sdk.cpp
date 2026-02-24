@@ -17,6 +17,13 @@ extern "C" {
 #include <libswresample/swresample.h>
 }
 
+// FFmpeg 5.0+ uses ch_layout (AVChannelLayout); FFmpeg 4.x uses channel_layout (uint64_t)
+#if LIBAVCODEC_VERSION_INT >= AV_VERSION_INT(59, 0, 0)
+#define ENCODE_SDK_FFMPEG_HAVE_CH_LAYOUT 1
+#else
+#define ENCODE_SDK_FFMPEG_HAVE_CH_LAYOUT 0
+#endif
+
 namespace encode_sdk {
 
 static void ff_check(int err, const char* what) {
@@ -115,7 +122,12 @@ public:
 
     AVFrame* af = av_frame_alloc();
     af->format = a_.enc->sample_fmt;
+#if ENCODE_SDK_FFMPEG_HAVE_CH_LAYOUT
     av_channel_layout_default(&af->ch_layout, a_.enc->ch_layout.nb_channels);
+#else
+    af->channel_layout = a_.enc->channel_layout;
+    af->channels = a_.enc->channels;
+#endif
     af->sample_rate = a_.enc->sample_rate;
     af->nb_samples = nb_samples;
     ff_check(av_frame_get_buffer(af, 0), "av_frame_get_buffer(audio)");
@@ -299,7 +311,12 @@ private:
 
     a_.enc->bit_rate = (int64_t)ap.bitrate_kbps * 1000;
     a_.enc->sample_rate = ap.sample_rate;
+#if ENCODE_SDK_FFMPEG_HAVE_CH_LAYOUT
     av_channel_layout_default(&a_.enc->ch_layout, ap.channels);
+#else
+    a_.enc->channel_layout = av_get_default_channel_layout(ap.channels);
+    a_.enc->channels = ap.channels;
+#endif
     a_.enc->time_base = AVRational{1, ap.sample_rate};
 
     // pick sample_fmt
@@ -318,11 +335,20 @@ private:
     // If our input is S16 and encoder isn't S16, set up resampler.
     if (a_.enc->sample_fmt != AV_SAMPLE_FMT_S16) {
       SwrContext* swr = nullptr;
+#if ENCODE_SDK_FFMPEG_HAVE_CH_LAYOUT
       ff_check(swr_alloc_set_opts2(&swr,
                                   &a_.enc->ch_layout, a_.enc->sample_fmt, a_.enc->sample_rate,
                                   &a_.enc->ch_layout, AV_SAMPLE_FMT_S16, a_.enc->sample_rate,
                                   0, nullptr),
                "swr_alloc_set_opts2");
+#else
+      int64_t layout = a_.enc->channel_layout;
+      swr = swr_alloc_set_opts(nullptr,
+                              layout, a_.enc->sample_fmt, a_.enc->sample_rate,
+                              layout, AV_SAMPLE_FMT_S16, a_.enc->sample_rate,
+                              0, nullptr);
+      if (!swr) throw std::runtime_error("swr_alloc_set_opts failed");
+#endif
       swr_.reset(swr);
       ff_check(swr_init(swr_.get()), "swr_init");
     }

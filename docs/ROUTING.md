@@ -72,11 +72,24 @@ IS-05 激活 Receiver 时提供传输参数（如 `destination_ip`、`destinatio
 
 ## 6. 推荐实施步骤
 
+### 6.1 方案 A：Easy-NMOS（推荐，一站式部署）
+
+若已部署 [Easy-NMOS](https://github.com/rhastie/easy-nmos)：
+
+1. **Easy-NMOS** 已包含 Registry + Controller（`/admin`），**无需单独部署 nmos-js**。  
+2. 设置 `REGISTRY_URL=http://<Easy-NMOS-IP>`（默认端口 80）。  
+3. 运行 `routing/scripts/register_node_example.py` 注册自研节点；使用 `--heartbeat` 保持注册有效。  
+4. 打开 `http://<Easy-NMOS-IP>/admin` 验证发现与管理。  
+
+**完整流程见 [EASY_NMOS_IMPLEMENTATION.md](EASY_NMOS_IMPLEMENTATION.md)。**
+
+### 6.2 方案 B：nmos-cpp + nmos-js 分别部署
+
 1. **部署 NMOS Registry**（如 [nmos-cpp](https://github.com/sony/nmos-cpp) 的 Registry 或其它 IS-04 实现）。  
-2. **部署 NMOS-JS**，配置 Registry Base URL，用于发现与连接管理。NMOS-JS **安装位置**、**配置与依赖**、以及如何满足路由管理软件详细需求见 **[NMOS_JS_DEPLOY.md](NMOS_JS_DEPLOY.md)**。  
+2. **部署 NMOS-JS**，配置 Registry Base URL。详见 **[NMOS_JS_DEPLOY.md](NMOS_JS_DEPLOY.md)**。  
 3. **在自研应用中集成 routing 适配层**：  
    - 启动时向 Registry 注册 Node/Device/Receiver（及可选 Sender）；  
    - 实现或代理 IS-05 接收端：收到激活请求后，解析传输参数，创建/更新 MTL SDK 的 `St2110Endpoint` 与 RX 会话（及可选编码管道）。  
-4. **外购 ST2110 编解码器**：将其配置为向同一 Registry 注册，即可在 NMOS-JS 中统一发现、连接与管理。  
+4. **外购 ST2110 编解码器**：将其配置为向同一 Registry 注册，即可在 Controller/nmos-js 中统一发现、连接与管理。  
 
-以上步骤均无需修改 NMOS-JS 源码；仅需配置与自研侧适配实现。
+以上步骤均无需修改 Controller/nmos-js 源码；仅需配置与自研侧适配实现。

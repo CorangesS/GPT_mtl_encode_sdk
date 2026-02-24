@@ -1,5 +1,9 @@
 # NMOS-JS 部署与配置：满足路由管理软件详细需求
 
+> **若已使用 Easy-NMOS**：Easy-NMOS 自带的 Controller（`http://<IP>/admin`）已提供可视化界面，**无需单独部署 nmos-js**。完整实现流程见 **[EASY_NMOS_IMPLEMENTATION.md](EASY_NMOS_IMPLEMENTATION.md)**。
+>
+> 本文档适用于 **nmos-cpp 等单独部署 Registry**、需要 nmos-js 作为 Web 客户端的场景。
+
 本文说明 **NMOS-JS 安装到哪里**、需要哪些**配置与依赖**，以及如何与 ST2110 收发测试、自研节点配合，完成 **需求.md** 中的「路由管理软件详细需求」。
 
 ---

@@ -25,21 +25,29 @@
 ## 使用步骤概要
 
 1. **部署 NMOS Registry**  
-   例如使用 [nmos-cpp](https://github.com/sony/nmos-cpp) 的 Registry，或其它符合 IS-04 的实现。
+   - **推荐**：使用 [Easy-NMOS](https://github.com/rhastie/easy-nmos)，一键部署 Registry + Controller（`/admin`），无需单独部署 nmos-js。  
+   - 或使用 [nmos-cpp](https://github.com/sony/nmos-cpp) 的 Registry 等 IS-04 实现。
 
-2. **部署并配置 NMOS-JS**  
-   将 NMOS-JS 的 build 部署到 Web 可访问目录（如 `/var/www/nmos-js` 或 nmos-cpp-registry 的 `admin/`），并配置 Registry Base URL。安装位置与配置详见 [../docs/NMOS_JS_DEPLOY.md](../docs/NMOS_JS_DEPLOY.md)。无需修改 NMOS-JS 代码。
+2. **部署并配置 Web 界面**  
+   - 若用 **Easy-NMOS**：访问 `http://<Easy-NMOS-IP>/admin` 即可，无需额外配置。  
+   - 若用 **nmos-cpp 单独部署**：需部署 [nmos-js](https://github.com/sony/nmos-js) 并配置 Registry Base URL，详见 [../docs/NMOS_JS_DEPLOY.md](../docs/NMOS_JS_DEPLOY.md)。
 
 3. **自研节点接入**  
-   - 在启动时通过 IS-04 Registration API 向 Registry 注册 Node、Device、Receiver（及可选 Sender）。
-   - 实现 IS-05 服务端（或通过适配服务代理）：收到连接激活请求时，解析传输参数（如目标 IP/端口或 SDP），创建或更新 MTL SDK 的 `St2110Endpoint` 与 RX 会话（参见 `mtl_sdk::Context::create_video_rx` / `create_audio_rx`）。
+   - 运行 `scripts/register_node_example.py` 向 Registry 注册 Node/Device/Receiver；支持 `--heartbeat` 保持注册有效。  
+   - 可选：使用 `scripts/run_with_nmos.sh` 在收流时同时进行 NMOS 注册。  
+   - 实现 IS-05 服务端（后续扩展）：收到连接激活请求时，解析传输参数，创建或更新 MTL SDK 的 `St2110Endpoint` 与 RX 会话。
 
 4. **外购 ST2110 设备**  
-   将其配置为向同一 Registry 注册，即可在 NMOS-JS 中与自研节点一起发现、连接与管理。
+   将其配置为向同一 Registry 注册，即可在 Controller 中与自研节点一起发现、连接与管理。
 
-## 示例脚本
+**完整实现流程见 [../docs/EASY_NMOS_IMPLEMENTATION.md](../docs/EASY_NMOS_IMPLEMENTATION.md)。**
 
-`scripts/register_node_example.py` 演示如何向已有 Registry 注册一个简单的 NMOS Node（含 Device 与 Receiver），以便在 NMOS-JS 中看到该节点并做连接管理。运行前请安装依赖并设置 Registry 的 Base URL（见脚本内说明）。该示例**不修改 NMOS-JS**，仅通过 Registry API 注册资源。
+## 脚本说明
+
+| 脚本 | 说明 |
+|------|------|
+| `scripts/register_node_example.py` | 向 Registry 注册 Node/Device/Receiver；`--heartbeat` 保持注册有效；`REGISTRY_URL` 指定 Registry 地址。 |
+| `scripts/run_with_nmos.sh` | 在后台启动 NMOS 注册，并运行 st2110_record 收流编码。 |
 
 ## 与 MTL/Encode SDK 的边界
 

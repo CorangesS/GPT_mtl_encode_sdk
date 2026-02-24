@@ -30,9 +30,9 @@
 
 | 需求 | 实现 |
 |------|------|
-| AMWA NMOS (IS-04/IS-05/IS-06/IS-08) | NMOS Registry + NMOS-JS |
-| 集中注册、发现、调度、路由与监控 | Registry 注册；NMOS-JS 发现与 IS-05 连接 |
-| 可视化界面 | NMOS-JS Web UI |
+| AMWA NMOS (IS-04/IS-05/IS-06/IS-08) | NMOS Registry + Controller（推荐 Easy-NMOS 一站式部署） |
+| 集中注册、发现、调度、路由与监控 | Registry 注册；Controller 发现与 IS-05 连接 |
+| 可视化界面 | Easy-NMOS Controller（`/admin`）或 NMOS-JS |
 | 自研/外购设备管理 | routing 适配层向 Registry 注册；外购设备同 Registry |
 
 ---
@@ -131,5 +131,18 @@ cmake --build . -j
 | [docs/COMPLIANCE.md](docs/COMPLIANCE.md) | 需求符合性检查 |
 | [docs/TESTING.md](docs/TESTING.md) | 本机/双机测试、参数、frame_cnt 说明 |
 | [docs/ROUTING.md](docs/ROUTING.md) | NMOS 路由对接 |
+| [docs/EASY_NMOS_IMPLEMENTATION.md](docs/EASY_NMOS_IMPLEMENTATION.md) | **路由管理实现指南（Easy-NMOS）** |
 | [docs/NMOS_JS_DEPLOY.md](docs/NMOS_JS_DEPLOY.md) | NMOS-JS 部署与配置 |
 | [routing/README.md](routing/README.md) | 路由模块说明 |
+
+## 八、路由管理快速开始（Easy-NMOS）
+
+若已部署 Easy-NMOS，快速接入自研节点：
+
+```bash
+export REGISTRY_URL=http://<Easy-NMOS-IP>   # 如 http://192.168.6.101
+python3 routing/scripts/register_node_example.py --heartbeat --interval 10 &
+./build/st2110_record --ip 239.0.0.1 --video-port 5004 --audio-port 0 --max-frames 600 recv.mp4
+```
+
+或使用一体化脚本：`routing/scripts/run_with_nmos.sh`。详见 [docs/EASY_NMOS_IMPLEMENTATION.md](docs/EASY_NMOS_IMPLEMENTATION.md)。
