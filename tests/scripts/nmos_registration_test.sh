@@ -19,12 +19,16 @@ echo "[nmos_registration_test] Registry: $BASE"
 
 export REGISTRY_URL="$BASE"
 
-python3 "$REG_SCRIPT" 2>/dev/null || {
-  echo "[nmos_registration_test] SKIP: Registry not reachable at $BASE"
+echo "[nmos_registration_test] Running register_node_example.py ..."
+python3 "$REG_SCRIPT"
+STATUS=$?
+if [ $STATUS -ne 0 ]; then
+  echo "[nmos_registration_test] SKIP: Registry not reachable or registration failed at $BASE (exit=$STATUS)"
   exit 0
-}
+fi
 
-NODES_URL="$BASE/x-nmos/registration/v1.2/resource/nodes"
+# 使用 Query API 验证节点是否可见（Query 与 Registration 同属 IS-04）
+NODES_URL="$BASE/x-nmos/query/v1.0/nodes"
 if command -v curl >/dev/null 2>&1; then
   RESP=$(curl -s "$NODES_URL" 2>/dev/null || true)
   if echo "$RESP" | grep -q "mtl-encode-sdk"; then
