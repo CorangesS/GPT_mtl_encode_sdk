@@ -25,7 +25,8 @@ static void usage(const char* prog) {
             << "  --height <h>            Default: 1080 (match sender)\n"
             << "  --fps <fps>             Default: 59.94 (match sender)\n"
             << "  --max-frames <n>        Stop after N video frames (default: 600)\n"
-            << "  --no-ptp                Disable PTP, use synthetic timestamps (fallback when NIC lacks PTP)\n";
+            << "  --no-ptp                Disable PTP, use synthetic timestamps (fallback when NIC lacks PTP)\n"
+            << "  --sdp <file>            Load SDP file to derive IP/ports/format (overrides --ip/--video-port/--audio-port/--width/--height/--fps)\n";
 }
 
 // Copy of video frame data for async pipeline (release RX buffer immediately after copy)
@@ -117,6 +118,7 @@ int main(int argc, char** argv) {
   std::string port_name = "kernel:lo";
   std::string sip = "127.0.0.1";
   std::string ip = "239.0.0.1";
+  std::string sdp_path;
   uint16_t video_port = 5004;
   uint16_t audio_port = 5006;
   int width = 1920;
@@ -137,8 +139,73 @@ int main(int argc, char** argv) {
     if (a == "--fps" && i + 1 < argc) { fps = atof(argv[++i]); continue; }
     if (a == "--max-frames" && i + 1 < argc) { max_frames = atoi(argv[++i]); continue; }
     if (a == "--no-ptp") { use_ptp = false; continue; }
+    if (a == "--sdp" && i + 1 < argc) { sdp_path = argv[++i]; continue; }
     if (a == "--help" || a == "-h") { usage(argv[0]); return 0; }
     if (a.compare(0, 2, "--") != 0) { out = a; continue; }
+  }
+
+  // If SDP is provided, override IP/ports and basic format from SDP.
+  int audio_sample_rate = 48000;
+  int audio_channels = 2;
+  int audio_bits = 16;
+  if (!sdp_path.empty()) {
+    try {
+      mtl_sdk::SdpSession sdp = mtl_sdk::load_sdp_file(sdp_path);
+      bool has_video = false;
+      bool has_audio = false;
+      for (const auto& m : sdp.media) {
+        if (m.type == mtl_sdk::SdpMedia::Type::Video && !has_video) {
+          ip = m.endpoint.ip;
+          video_port = m.endpoint.udp_port;
+          // default values; may be refined from fmtp
+          int w = width;
+          int h = height;
+          double f = fps;
+          for (const auto& kv : m.fmtp_kv) {
+            if (kv.rfind("width=", 0) == 0) {
+              w = std::stoi(kv.substr(6));
+            } else if (kv.rfind("height=", 0) == 0) {
+              h = std::stoi(kv.substr(7));
+            } else if (kv.rfind("exactframerate=", 0) == 0) {
+              std::string fr = kv.substr(std::string("exactframerate=").size());
+              auto slash = fr.find('/');
+              if (slash != std::string::npos) {
+                int num = std::stoi(fr.substr(0, slash));
+                int den = std::stoi(fr.substr(slash + 1));
+                if (den != 0) f = (double)num / (double)den;
+              }
+            }
+          }
+          width = w;
+          height = h;
+          fps = f;
+          has_video = true;
+        } else if (m.type == mtl_sdk::SdpMedia::Type::Audio && !has_audio) {
+          ip = m.endpoint.ip;
+          audio_port = m.endpoint.udp_port;
+          // parse rtpmap: encoding/sample_rate/channels
+          if (!m.rtpmap.empty()) {
+            auto first = m.rtpmap.find('/');
+            if (first != std::string::npos) {
+              auto second = m.rtpmap.find('/', first + 1);
+              if (second != std::string::npos) {
+                audio_sample_rate = std::stoi(m.rtpmap.substr(first + 1, second - first - 1));
+                audio_channels = std::stoi(m.rtpmap.substr(second + 1));
+              } else {
+                audio_sample_rate = std::stoi(m.rtpmap.substr(first + 1));
+              }
+            }
+          }
+          has_audio = true;
+        }
+      }
+      std::cout << "Loaded SDP from " << sdp_path << ", ip=" << ip
+                << " video_port=" << video_port
+                << " audio_port=" << audio_port << "\n";
+    } catch (...) {
+      std::cerr << "Failed to load/parse SDP file: " << sdp_path << "\n";
+      return 1;
+    }
   }
 
   // ---- MTL SDK ----
@@ -175,9 +242,9 @@ int main(int argc, char** argv) {
   std::unique_ptr<mtl_sdk::Context::AudioRxSession> a_rx;
   if (audio_port != 0) {
     mtl_sdk::AudioFormat af;
-    af.sample_rate = 48000;
-    af.channels = 2;
-    af.bits_per_sample = 16;
+    af.sample_rate = audio_sample_rate;
+    af.channels = audio_channels;
+    af.bits_per_sample = audio_bits;
     mtl_sdk::St2110Endpoint aep{ ip, audio_port, 97 };
     a_rx = ctx->create_audio_rx(af, aep);
   }

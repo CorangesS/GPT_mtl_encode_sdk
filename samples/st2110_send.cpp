@@ -25,7 +25,8 @@ static void usage(const char* prog) {
             << "  --height <h>             Default: 1080\n"
             << "  --fps <fps>              Default: 59.94\n"
             << "  --duration <sec>         Run for N seconds (default: 10)\n"
-            << "  --no-ptp                 Disable PTP, use synthetic timestamps (fallback when NIC lacks PTP)\n";
+            << "  --no-ptp                 Disable PTP, use synthetic timestamps (fallback when NIC lacks PTP)\n"
+            << "  --sdp-out <file>         Export SDP describing the video/audio streams to <file>\n";
 }
 
 // Convert yuv420p10le (3 planes) to yuv422p10le (3 planes).
@@ -55,6 +56,7 @@ int main(int argc, char** argv) {
   std::string sip = "127.0.0.1";
   std::string url;
   std::string fmt_str = "yuv420p10le";
+  std::string sdp_out;
   uint16_t video_port = 5004;
   uint16_t audio_port = 5006;
   int width = 1920;
@@ -77,6 +79,7 @@ int main(int argc, char** argv) {
     if (a == "--fps" && i + 1 < argc) { fps = atof(argv[++i]); continue; }
     if (a == "--duration" && i + 1 < argc) { duration_sec = atoi(argv[++i]); continue; }
     if (a == "--no-ptp") { use_ptp = false; continue; }
+    if (a == "--sdp-out" && i + 1 < argc) { sdp_out = argv[++i]; continue; }
     if (a == "--help" || a == "-h") { usage(argv[0]); return 0; }
   }
 
@@ -120,6 +123,46 @@ int main(int argc, char** argv) {
     af.bits_per_sample = 16;
     mtl_sdk::St2110Endpoint aep{ip, audio_port, 97};
     a_tx = ctx->create_audio_tx(af, aep);
+  }
+
+  // Optionally export an SDP file that describes the current streams.
+  if (!sdp_out.empty()) {
+    mtl_sdk::SdpSession sdp;
+    sdp.session_name = "st2110_send";
+    sdp.origin = "- 0 0 IN IP4 " + sip;
+    sdp.connection = "IN IP4 " + ip + "/32";
+
+    // Video media
+    {
+      mtl_sdk::SdpMedia mv;
+      mv.type = mtl_sdk::SdpMedia::Type::Video;
+      mv.endpoint = vep;
+      mv.rtpmap = "raw/90000";
+      mv.fmtp_kv.push_back("sampling=YCbCr-4:2:2");
+      mv.fmtp_kv.push_back("width=" + std::to_string(width));
+      mv.fmtp_kv.push_back("height=" + std::to_string(height));
+      // encode fps as exactframerate=N/1000 for typical fractional rates
+      int fps_num = static_cast<int>(fps * 1000.0 + 0.5);
+      int fps_den = 1000;
+      mv.fmtp_kv.push_back("exactframerate=" + std::to_string(fps_num) + "/" + std::to_string(fps_den));
+      sdp.media.push_back(std::move(mv));
+    }
+
+    // Audio media (optional)
+    if (a_tx) {
+      mtl_sdk::SdpMedia ma;
+      ma.type = mtl_sdk::SdpMedia::Type::Audio;
+      ma.endpoint = {ip, audio_port, 97};
+      ma.rtpmap = "L16/48000/2";
+      sdp.media.push_back(std::move(ma));
+    }
+
+    try {
+      mtl_sdk::save_sdp_file(sdp_out, sdp);
+      std::cout << "Wrote SDP to " << sdp_out << "\n";
+    } catch (...) {
+      std::cerr << "Failed to write SDP file: " << sdp_out << "\n";
+    }
   }
 
   // Frame buffers for YUV422 10-bit (3 planes: Y, U, V)
