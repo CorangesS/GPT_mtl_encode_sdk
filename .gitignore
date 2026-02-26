@@ -24,7 +24,22 @@ Release/
 *.o
 *.obj
 
-
+*.mp4
+*.mxf
+*.mov
+*.avi
+*.mkv
+*.flv
+*.wmv
+*.webm
+*.mp3
+*.wav
+*.aac
+*.m4a
+*.m4v
+*.m4b
+*.m4p
+*.m4s
 
 build/
 *.yuv

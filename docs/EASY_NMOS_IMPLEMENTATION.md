@@ -179,7 +179,7 @@ python3 register_node_example.py --heartbeat --interval 30
 3. 构造 `St2110Endpoint`、`VideoFormat`/`AudioFormat`
 4. 调用 `Context::create_video_rx` / `create_audio_rx` 创建/更新收流
 
-实现方案见 [ROUTING.md](ROUTING.md) 第 3、4 节。
+**完整实现说明（Connection API 路径、PATCH 体格式、MTL 映射、单进程结构示例）见 [IS05_SERVER_IMPLEMENTATION.md](IS05_SERVER_IMPLEMENTATION.md)**。概要见 [ROUTING.md](ROUTING.md) 第 3、4 节。
 
 ---
 

@@ -132,6 +132,7 @@ cmake --build . -j
 | [docs/TESTING.md](docs/TESTING.md) | 本机/双机测试、参数、frame_cnt 说明 |
 | [docs/ROUTING.md](docs/ROUTING.md) | NMOS 路由对接 |
 | [docs/EASY_NMOS_IMPLEMENTATION.md](docs/EASY_NMOS_IMPLEMENTATION.md) | **路由管理实现指南（Easy-NMOS）** |
+| [docs/IS05_SERVER_IMPLEMENTATION.md](docs/IS05_SERVER_IMPLEMENTATION.md) | **自研节点 IS-05 服务端实现详解** |
 | [docs/NMOS_JS_DEPLOY.md](docs/NMOS_JS_DEPLOY.md) | NMOS-JS 部署与配置 |
 | [routing/README.md](routing/README.md) | 路由模块说明 |
 

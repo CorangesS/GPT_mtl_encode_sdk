@@ -35,7 +35,7 @@
 3. **自研节点接入**  
    - 运行 `scripts/register_node_example.py` 向 Registry 注册 Node/Device/Receiver；支持 `--heartbeat` 保持注册有效。  
    - 可选：使用 `scripts/run_with_nmos.sh` 在收流时同时进行 NMOS 注册。  
-   - 实现 IS-05 服务端（后续扩展）：收到连接激活请求时，解析传输参数，创建或更新 MTL SDK 的 `St2110Endpoint` 与 RX 会话。
+   - 实现 IS-05 服务端（后续扩展）：收到连接激活请求时，解析传输参数，创建或更新 MTL SDK 的 `St2110Endpoint` 与 RX 会话。**详细步骤与接口说明见 [../docs/IS05_SERVER_IMPLEMENTATION.md](../docs/IS05_SERVER_IMPLEMENTATION.md)**。
 
 4. **外购 ST2110 设备**  
    将其配置为向同一 Registry 注册，即可在 Controller 中与自研节点一起发现、连接与管理。
