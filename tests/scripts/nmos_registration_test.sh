@@ -7,7 +7,7 @@
 set -e
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 REG_SCRIPT="$REPO_ROOT/routing/scripts/register_node_example.py"
-BASE="${REGISTRY_URL:-http://127.0.0.1}"
+BASE="${REGISTRY_URL:-http://192.168.1.101}"
 BASE="${BASE%/}"
 
 if [ ! -f "$REG_SCRIPT" ]; then

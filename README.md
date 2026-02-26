@@ -23,7 +23,7 @@
 | AAC、MP2、PCM、AC3 | `AudioCodec::AAC|MP2|PCM|AC3` |
 | MP4、MXF | `Container::MP4|MXF` |
 | 编码参数可调 | `bitrate_kbps`、`gop`、`profile`、`set_video_bitrate_kbps`、`apply_reconfigure` |
-| 零拷贝送入编码器 | `wrap_video_frame` 直接引用 planes，无 memcpy |
+| 零拷贝送入编码器 | `wrap_video_frame` 对 HostPtr 直接引用 planes；对 CudaDevice 使用 AV_PIX_FMT_CUDA 送 NVENC 零拷贝；DmaBufFd 预留 |
 | 音视频时间戳同步 | `first_ts_ns` + `av_rescale_q` 统一 time_base |
 
 ### 路由管理（需求.md §3）
@@ -142,11 +142,12 @@ cmake --build . -j
 
 ```bash
 export REGISTRY_URL=http://<Easy-NMOS-IP>   # 如 http://192.168.6.101
-python3 routing/scripts/register_node_example.py --heartbeat --interval 10 &
-./build/st2110_record --ip 239.0.0.1 --video-port 5004 --audio-port 0 --max-frames 600 recv.mp4
+python3 routing/scripts/register_node_example.py --heartbeat --interval 10 --save-config .nmos_node.json &
+python3 routing/is05_server/app.py &        # IS-05 服务（可选，使 Controller 连接能驱动收流）
+./build/is05_receiver_daemon &               # 或 ./build/st2110_record ... 收流编码
 ```
 
-或使用一体化脚本：`routing/scripts/run_with_nmos.sh`。详见 [docs/EASY_NMOS_IMPLEMENTATION.md](docs/EASY_NMOS_IMPLEMENTATION.md)。
+或仅注册 + 手动收流：`routing/scripts/run_with_nmos.sh`。IS-05 服务端与 daemon 说明见 [routing/is05_server/README.md](routing/is05_server/README.md)。详见 [docs/EASY_NMOS_IMPLEMENTATION.md](docs/EASY_NMOS_IMPLEMENTATION.md)。
 
 ## 九、测试
 

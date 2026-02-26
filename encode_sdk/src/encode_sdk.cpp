@@ -88,6 +88,16 @@ public:
     AVFrame* src = wrap_video_frame(frame);
     AVFrame* in = src;
 
+#if defined(AV_PIX_FMT_CUDA)
+    // CUDA frames go directly to NVENC (no swscale; libswscale does not support CUDA input)
+    if (src->format == AV_PIX_FMT_CUDA) {
+      src->pts = pts;
+      encode_and_write(v_, src);
+      av_frame_free(&src);
+      return true;
+    }
+#endif
+
     // If input pix_fmt doesn't match encoder pix_fmt, convert via swscale to encoder_fmt_ (NV12/P010)
     if (src->format != v_.enc->pix_fmt) {
       AVFrame* conv = alloc_video_frame(v_.enc->pix_fmt, v_.enc->width, v_.enc->height);
@@ -376,10 +386,27 @@ private:
     f->width = frame.fmt.width;
     f->height = frame.fmt.height;
 
-    // For HostPtr, we point AVFrame planes at user memory (no copy).
+    // HostPtr: point AVFrame planes at user memory (no copy).
+    // CudaDevice: point AVFrame at GPU memory for zero-copy NVENC (no host round-trip).
+    // DmaBufFd: reserved for future (import DMA-BUF into CUDA then use CudaDevice path).
+    if (frame.mem_type == mtl_sdk::MemoryType::CudaDevice) {
+#ifdef AV_PIX_FMT_CUDA
+      // CUDA device pointer in planes[0].data; single buffer for NVENC zero-copy input.
+      f->format = AV_PIX_FMT_CUDA;
+      f->data[0] = frame.planes[0].data;
+      f->linesize[0] = frame.planes[0].linesize > 0 ? frame.planes[0].linesize : (w * 2);
+      // No swscale for CUDA; encoder (e.g. h264_nvenc) must accept AV_PIX_FMT_CUDA.
+      return f;
+#else
+      throw std::runtime_error("CudaDevice requires FFmpeg built with CUDA (AV_PIX_FMT_CUDA)");
+#endif
+    }
+    if (frame.mem_type == mtl_sdk::MemoryType::DmaBufFd) {
+      // Future: import dmabuf (frame.dmabuf_fd) into CUDA/VAAPI and attach to AVFrame.
+      throw std::runtime_error("DmaBufFd not yet implemented; use CudaDevice or HostPtr");
+    }
     if (frame.mem_type != mtl_sdk::MemoryType::HostPtr) {
-      // Placeholder: implement DMABUF/CUDA import here when available.
-      throw std::runtime_error("Non-host video memory type not implemented in default encoder");
+      throw std::runtime_error("Unknown video memory type");
     }
 
     f->data[0] = frame.planes[0].data;

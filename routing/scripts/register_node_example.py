@@ -219,6 +219,12 @@ def main():
         default="mtl-encode-sdk-host",
         help="Node hostname (default: mtl-encode-sdk-host)",
     )
+    parser.add_argument(
+        "--save-config",
+        metavar="PATH",
+        default=None,
+        help="Save node_id, device_id, receiver_id, href, hostname to JSON file for IS-05 server (e.g. .nmos_node.json)",
+    )
     args = parser.parse_args()
 
     base = os.environ.get("REGISTRY_URL", "http://127.0.0.1").rstrip("/")
@@ -238,7 +244,18 @@ def main():
 
     print("Done. Node:", nid, "Receiver:", rid)
     print("Controller:", base + "/admin")
-    print("To make connections drive MTL SDK, implement IS-05 (see docs/ROUTING.md).")
+    if args.save_config:
+        config = {
+            "node_id": nid,
+            "device_id": did,
+            "receiver_id": rid,
+            "href": args.href,
+            "hostname": args.hostname,
+        }
+        with open(args.save_config, "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=2)
+        print("Saved config to:", args.save_config)
+    print("To make connections drive MTL SDK, run IS-05 server: python3 routing/is05_server/app.py")
 
     if not args.heartbeat:
         return

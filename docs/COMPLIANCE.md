@@ -29,7 +29,7 @@
 | 需求.md | 音频编码 **AAC、MP2、PCM、AC3** | **符合**。`AudioCodec::AAC|MP2|PCM|AC3`，`audio_codec_name()` 映射到 aac/mp2/pcm_s16le/ac3。 |
 | 需求.md | 文件格式 **MP4、MXF** | **符合**。`Container::MP4|MXF`，`container_name()` 对应 mp4/mxf。 |
 | 需求.md | 编码参数可调（编码标准、码率、GOP、Profile），运行期调整 | **符合**。`VideoEncodeParams` 含 codec、bitrate_kbps、gop、profile；`Session` 提供 `set_video_bitrate_kbps`、`set_video_gop`、`apply_reconfigure()`。 |
-| 需求.md | ST2110 原始流直接送入编码器，避免不必要内存拷贝 | **符合**。`wrap_video_frame()` 对 HostPtr 直接将 `frame.planes[].data` 赋给 `AVFrame->data[]`，无额外 memcpy；格式不一致时用 swscale；非 Host 类型预留并报未实现。 |
+| 需求.md | ST2110 原始流直接送入编码器，避免不必要内存拷贝 | **符合**。`wrap_video_frame()` 对 **HostPtr** 直接引用 `frame.planes[].data`，无 memcpy；对 **CudaDevice** 将 GPU 指针赋给 `AVFrame->data[0]`（AV_PIX_FMT_CUDA），直接送 NVENC，零拷贝；**DmaBufFd** 保留接口，暂未实现。 |
 | 需求.md | 时间戳与 ST2110 同步，音视频同步 | **符合**。视频/音频均用 `first_ts_ns` 记录首帧，`rel_ns = timestamp_ns - first_ts_ns`，`av_rescale_q(rel_ns, {1,1e9}, time_base)` 得到 PTS，时间基一致。 |
 | 设计规格 | Session：open、push_video、push_audio、close | **符合**。`encode_sdk.hpp` 与 `SessionImpl` 一致。 |
 | 设计规格 | Sample：从 MTL 拉帧写出 out.mp4 | **符合**。`samples/st2110_record.cpp` 使用 MTL RX + encode_sdk 写出 MP4。 |

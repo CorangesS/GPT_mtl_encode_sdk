@@ -82,5 +82,9 @@ target_link_libraries(st2110_record PRIVATE mtl_sdk encode_sdk)
 add_executable(st2110_send samples/st2110_send.cpp)
 target_link_libraries(st2110_send PRIVATE mtl_sdk)
 
+# IS-05 receiver daemon: reads connection_state.json, creates MTL RX and encodes to MP4
+add_executable(is05_receiver_daemon samples/is05_receiver_daemon.cpp)
+target_link_libraries(is05_receiver_daemon PRIVATE mtl_sdk encode_sdk)
+
 # ---- tests ----
 add_subdirectory(tests)

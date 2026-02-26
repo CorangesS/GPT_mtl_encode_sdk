@@ -56,6 +56,8 @@ run_unit encode_format_test
 run_unit encode_reconfigure_test
 run_unit ptp_behavior_test
 run_script st2110_roundtrip_test.sh
+# NMOS Registry 默认 192.168.1.101:8080；可通过环境变量 REGISTRY_URL 覆盖
+export REGISTRY_URL="${REGISTRY_URL:-http://192.168.1.101:8080}"
 run_script nmos_registration_test.sh
 
 echo "=== Done: $FAIL failure(s) ==="

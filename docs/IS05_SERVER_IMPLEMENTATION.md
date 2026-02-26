@@ -205,3 +205,11 @@ std::map<std::string, ReceiverState> g_receivers;
 - **错误处理**：PATCH 若参数非法或 MTL 创建失败，应返回 4xx 及 IS-05 规定的 error 格式，并将 `activation.mode` 置回 `null`，不改变现有 active 状态。
 
 按上述实现后，在 Controller 中对自研 Receiver 执行「连接」即可驱动 MTL 实际订阅对应组播并收流（并可同时送入编码 SDK 写文件）。
+
+---
+
+## 九、本项目已提供的实现
+
+- **routing/is05_server/**：Python Flask 实现的 IS-05 Connection API（single 模式）。收到 PATCH 且 `activate_immediate` 时解析 `transport_params` 或 `transport_file`（SDP），将连接状态写入 **connection_state.json**。
+- **samples/is05_receiver_daemon**：C++ 程序，轮询 connection_state.json，根据其中的 video 端点调用 `Context::create_video_rx` 并收流编码为 MP4。与 IS-05 服务配合即可实现「Controller 连接 → 驱动 MTL 收流」。
+- 注册时使用 `register_node_example.py --save-config .nmos_node.json`，IS-05 服务从该文件读取 receiver_id 以保持与 IS-04 一致。详见 [routing/is05_server/README.md](../routing/is05_server/README.md)。

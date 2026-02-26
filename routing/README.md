@@ -33,21 +33,22 @@
    - 若用 **nmos-cpp 单独部署**：需部署 [nmos-js](https://github.com/sony/nmos-js) 并配置 Registry Base URL，详见 [../docs/NMOS_JS_DEPLOY.md](../docs/NMOS_JS_DEPLOY.md)。
 
 3. **自研节点接入**  
-   - 运行 `scripts/register_node_example.py` 向 Registry 注册 Node/Device/Receiver；支持 `--heartbeat` 保持注册有效。  
+   - 运行 `scripts/register_node_example.py` 向 Registry 注册 Node/Device/Receiver；支持 `--heartbeat` 保持注册有效；使用 `--save-config .nmos_node.json` 可保存 receiver_id 供 IS-05 服务读取。  
    - 可选：使用 `scripts/run_with_nmos.sh` 在收流时同时进行 NMOS 注册。  
-   - 实现 IS-05 服务端（后续扩展）：收到连接激活请求时，解析传输参数，创建或更新 MTL SDK 的 `St2110Endpoint` 与 RX 会话。**详细步骤与接口说明见 [../docs/IS05_SERVER_IMPLEMENTATION.md](../docs/IS05_SERVER_IMPLEMENTATION.md)**。
+   - **IS-05 服务端**：运行 `is05_server/app.py` 提供 Connection API；收到 PATCH 激活时写入 connection_state.json，由 C++ 程序 `is05_receiver_daemon` 读取并驱动 MTL `create_video_rx`。详见 [is05_server/README.md](is05_server/README.md) 与 [../docs/IS05_SERVER_IMPLEMENTATION.md](../docs/IS05_SERVER_IMPLEMENTATION.md)。
 
 4. **外购 ST2110 设备**  
    将其配置为向同一 Registry 注册，即可在 Controller 中与自研节点一起发现、连接与管理。
 
 **完整实现流程见 [../docs/EASY_NMOS_IMPLEMENTATION.md](../docs/EASY_NMOS_IMPLEMENTATION.md)。**
 
-## 脚本说明
+## 脚本与服务说明
 
-| 脚本 | 说明 |
-|------|------|
-| `scripts/register_node_example.py` | 向 Registry 注册 Node/Device/Receiver；`--heartbeat` 保持注册有效；`REGISTRY_URL` 指定 Registry 地址。 |
+| 脚本/服务 | 说明 |
+|----------|------|
+| `scripts/register_node_example.py` | 向 Registry 注册 Node/Device/Receiver；`--heartbeat` 保持注册有效；`--save-config PATH` 保存 node/receiver 信息供 IS-05 使用。 |
 | `scripts/run_with_nmos.sh` | 在后台启动 NMOS 注册，并运行 st2110_record 收流编码。 |
+| **is05_server/** | IS-05 Connection API 服务端（Python）；PATCH 激活时写 connection_state.json，供 is05_receiver_daemon 驱动 MTL RX。见 [is05_server/README.md](is05_server/README.md)。 |
 
 ## 与 MTL/Encode SDK 的边界
 
