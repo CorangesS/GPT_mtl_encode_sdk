@@ -78,42 +78,71 @@ except ImportError:
             return False
 
 
+def _parse_href(href):
+    """从 href 解析 host/port/protocol，用于 api.endpoints（IS-04 v1.3 必需）。"""
+    try:
+        from urllib.parse import urlparse
+        u = urlparse(href)
+        host = u.hostname or "127.0.0.1"
+        port = u.port if u.port is not None else (443 if u.scheme == "https" else 9090)
+        protocol = u.scheme or "http"
+        return host, port, protocol
+    except Exception:
+        return "127.0.0.1", 9090, "http"
+
+
 def make_resources(node_href, node_hostname):
-    """生成 IS-04 Node/Device/Receiver 资源。"""
-    node_id = "mtl-encode-sdk-node-" + str(uuid.uuid4())[:8]
-    device_id = "mtl-encode-sdk-device-" + str(uuid.uuid4())[:8]
-    receiver_id = "mtl-encode-sdk-video-rx-" + str(uuid.uuid4())[:8]
+    """生成 IS-04 Node/Device/Receiver 资源（符合 IS-04 v1.3 schema）。"""
+    node_id = str(uuid.uuid4())
+    device_id = str(uuid.uuid4())
+    receiver_id = str(uuid.uuid4())
     t = int(time.time())
     v = f"{t}:0"
 
+    host, port, protocol = _parse_href(node_href)
     node = {
         "id": node_id,
         "version": v,
         "label": "MTL-Encode-SDK Node (Receiver)",
+        "description": "MTL-Encode-SDK node for ST2110 receive and encode",
+        "tags": {},
         "href": node_href,
         "hostname": node_hostname,
-        "api": {"versions": ["v1.2", "v1.1", "v1.0"]},
+        "api": {
+            "versions": ["v1.3", "v1.2", "v1.1", "v1.0"],
+            "endpoints": [{"host": host, "port": port, "protocol": protocol}],
+        },
         "caps": {},
         "services": [],
         "clocks": [],
-        "interfaces": [{"name": "eth0", "chassis_id": "00:00:00:00:00:00", "port_id": "1"}],
+        "interfaces": [
+            {"name": "eth0", "chassis_id": "00-00-00-00-00-00", "port_id": "00-00-00-00-00-01"}
+        ],
     }
     device = {
         "id": device_id,
         "version": v,
         "label": "ST2110 RX + Encode Device",
+        "description": "ST2110 receive and encode device",
+        "tags": {},
         "node_id": node_id,
         "receivers": [receiver_id],
         "senders": [],
+        "type": "urn:x-nmos:device:generic",
+        "controls": [],
     }
+    # Receiver 必须符合 receiver_video + receiver_core：transport、interface_bindings 必需
     receiver = {
         "id": receiver_id,
         "version": v,
         "label": "Video Receiver (ST2110)",
         "description": "MTL SDK video RX; IS-05 activation drives St2110Endpoint",
+        "tags": {},
         "device_id": device_id,
-        "format": "video/raw",
-        "caps": {},
+        "format": "urn:x-nmos:format:video",
+        "caps": {"media_types": ["video/raw"]},
+        "transport": "urn:x-nmos:transport:rtp.ucast",
+        "interface_bindings": ["eth0"],
         "subscription": {"sender_id": None, "active": False},
     }
     return node, device, receiver, node_id, device_id, receiver_id
