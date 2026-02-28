@@ -65,6 +65,7 @@ struct StreamCtx {
   AVStream* st = nullptr;
   AVCodecContext* enc = nullptr;
   int64_t first_ts_ns = AV_NOPTS_VALUE;
+  int64_t last_pts = AV_NOPTS_VALUE;  // ensure monotonically increasing pts/dts
 };
 
 class SessionImpl final : public Session {
@@ -80,10 +81,21 @@ public:
     if (!v_.enc) return false;
     if (frame.fmt.width <= 0 || frame.fmt.height <= 0) return false;
 
-    // Convert timestamp to PTS in video timebase
-    if (v_.first_ts_ns == AV_NOPTS_VALUE) v_.first_ts_ns = frame.timestamp_ns;
-    int64_t rel_ns = frame.timestamp_ns - v_.first_ts_ns;
-    int64_t pts = av_rescale_q(rel_ns, AVRational{1, 1000000000}, v_.enc->time_base);
+    // Convert timestamp to PTS in video timebase, but enforce strictly
+    // monotonically increasing PTS to satisfy container muxers (e.g. MP4).
+    int64_t pts = 0;
+    if (frame.timestamp_ns > 0) {
+      if (v_.first_ts_ns == AV_NOPTS_VALUE) v_.first_ts_ns = frame.timestamp_ns;
+      int64_t rel_ns = frame.timestamp_ns - v_.first_ts_ns;
+      pts = av_rescale_q(rel_ns, AVRational{1, 1000000000}, v_.enc->time_base);
+    } else {
+      // Fallback: derive purely from frame index when no valid timestamp
+      pts = (v_.last_pts == AV_NOPTS_VALUE) ? 0 : (v_.last_pts + 1);
+    }
+    if (v_.last_pts != AV_NOPTS_VALUE && pts <= v_.last_pts) {
+      pts = v_.last_pts + 1;
+    }
+    v_.last_pts = pts;
 
     AVFrame* src = wrap_video_frame(frame);
     AVFrame* in = src;
@@ -157,6 +169,10 @@ public:
     }
 
     int64_t pts = av_rescale_q(rel_ns, AVRational{1, 1000000000}, a_.enc->time_base);
+    if (a_.last_pts != AV_NOPTS_VALUE && pts <= a_.last_pts) {
+      pts = a_.last_pts + 1;
+    }
+    a_.last_pts = pts;
     af->pts = pts;
 
     encode_and_write(a_, af);
