@@ -130,6 +130,7 @@ cmake --build . -j
 | [docs/README.md](docs/README.md) | 文档导航 |
 | [docs/COMPLIANCE.md](docs/COMPLIANCE.md) | 需求符合性检查 |
 | [docs/TESTING.md](docs/TESTING.md) | 本机/双机测试、参数、frame_cnt 说明 |
+| [docs/DPDK_MTL_SETUP.md](docs/DPDK_MTL_SETUP.md) | 双机直连下 DPDK/MTL 配置（IOMMU、大页、VFIO、网卡绑定） |
 | [docs/ROUTING.md](docs/ROUTING.md) | NMOS 路由对接 |
 | [docs/EASY_NMOS_IMPLEMENTATION.md](docs/EASY_NMOS_IMPLEMENTATION.md) | **路由管理实现指南（Easy-NMOS）** |
 | [docs/IS05_SERVER_IMPLEMENTATION.md](docs/IS05_SERVER_IMPLEMENTATION.md) | **自研节点 IS-05 服务端实现详解** |

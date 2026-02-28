@@ -1,0 +1,10 @@
+# 双机 ST2110 固定 IP 配置（Netplan）
+
+用于**固定**发送端与接收端网卡 IP，重启后不消失。
+
+| 文件 | 机器 | 网卡 | 固定 IP |
+|------|------|------|--------|
+| `99-st2110-sender-enp4s0.yaml` | 发送端（本机） | enp4s0 | 192.168.10.1/24 |
+| `99-st2110-receiver-enp6s0.yaml` | 接收端 | enp6s0 | 192.168.10.2/24 |
+
+**用法**：将对应文件复制到 `/etc/netplan/` 后执行 `sudo netplan apply`。详见 [TESTING.md §2.1.1](../TESTING.md)。

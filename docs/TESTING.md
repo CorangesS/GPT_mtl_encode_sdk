@@ -46,6 +46,139 @@
 [A 机] st2110_send → ST2110 组播 239.0.0.1:5004 → [B 机] st2110_record → recv.mp4
 ```
 
+### 2.1 使用 Kernel 模式（两机已能 ping 通时）
+
+无需 DPDK，直接指定直连网卡和本机 IP 即可。假设：A 机 IP `192.168.10.1`，B 机 IP `192.168.10.2`，网卡名均为 `enp3s0`（以 `ip link` 实际为准）。
+
+**发送端（A 机，本机）**——从 `build/yuv420p10le_1080p.yuv` 发送（1920×1080，默认 59.94fps）：
+
+```bash
+cd build   # 或项目根目录，保证能访问到 build/yuv420p10le_1080p.yuv
+./st2110_send --url build/yuv420p10le_1080p.yuv --width 1920 --height 1080 \
+  --duration 30 --audio-port 0 --ip 239.0.0.1 --video-port 5004 \
+  --port kernel:enp3s0 --sip 192.168.10.1 --no-ptp
+```
+
+**接收端（B 机）**——先启动：
+
+```bash
+cd build
+./st2110_record --ip 239.0.0.1 --video-port 5004 --audio-port 0 \
+  --width 1920 --height 1080 --max-frames 1800 recv.mp4 \
+  --port kernel:enp3s0 --sip 192.168.10.2 --no-ptp
+```
+
+若 YUV 在项目根目录的 `build/` 下，在项目根执行时用 `--url build/yuv420p10le_1080p.yuv`；若在 `build/` 下执行则用 `--url yuv420p10le_1080p.yuv`。
+
+#### 2.1.1 示例：本机 enp4s0、接收端 enp6s0（网络配置与命令详解）
+
+**拓扑**：发送端（本机）用网卡 **enp4s0**，接收端用网卡 **enp6s0**，两机直连或在同一网段。组播流从本机发出，接收端订阅同一组播地址接收。
+
+**第一步：本机（发送端）配置 enp4s0**（若已按下方「固定两台电脑 IP」用 Netplan 配置，可跳过）
+
+临时配置：给 enp4s0 配置静态 IP，使 MTL 能从该网卡读到源 IP：
+
+```bash
+# 本机执行（发送端）
+sudo ip addr add 192.168.10.1/24 dev enp4s0
+```
+
+验证：`ip -4 addr show enp4s0` 应看到 `inet 192.168.10.1/24`。
+
+**第二步：接收端配置 enp6s0**（若已按下方「固定两台电脑 IP」用 Netplan 配置，可跳过）
+
+临时配置：在接收端机器上给 enp6s0 配置同一网段的 IP（且不能与发送端冲突）：
+
+```bash
+# 在接收端机器上执行
+sudo ip addr add 192.168.10.2/24 dev enp6s0
+```
+
+验证：`ip -4 addr show enp6s0` 应看到 `inet 192.168.10.2/24`。
+
+**第三步：连通性测试（可选）**
+
+两机直连时，在本机执行：`ping -c 2 192.168.10.2`；在接收端执行：`ping -c 2 192.168.10.1`。能 ping 通说明网络正常。
+
+**第四步：接收端先启动**
+
+在**接收端**机器上进入 build 目录，先启动接收程序（先订阅组播，再发流效果更好）：
+
+```bash
+cd /path/to/GPT_mtl_encode_sdk/build
+
+./st2110_record --ip 239.0.0.1 --video-port 5004 --audio-port 0 \
+  --width 1920 --height 1080 --max-frames 1800 recv.mp4 \
+  --port kernel:enp6s0 --sip 192.168.10.2 --no-ptp
+```
+
+**第五步：本机（发送端）再启动发送**
+
+在本机执行：
+
+```bash
+cd /home/aa/GPT_mtl_encode_sdk/build
+
+./st2110_send --url yuv420p10le_1080p.yuv --width 1920 --height 1080 \
+  --duration 30 --audio-port 0 --ip 239.0.0.1 --video-port 5004 \
+  --port kernel:enp4s0 --sip 192.168.10.1 --no-ptp
+```
+
+**参数详解**
+
+| 参数 | 发送端（本机） | 接收端 | 说明 |
+|------|----------------|--------|------|
+| `--port` | `kernel:enp4s0` | `kernel:enp6s0` | 使用的网卡：本机用 enp4s0，接收端用 enp6s0。`kernel:` 表示走内核协议栈（Socket），不占用 DPDK。 |
+| `--sip` | `192.168.10.1` | `192.168.10.2` | 本机在该网卡上的源 IP，需与上面配置的 IP 一致；MTL 会据此校验并从该网卡收发。 |
+| `--ip` | `239.0.0.1` | `239.0.0.1` | 组播地址，两端必须一致，发送端发往该地址，接收端订阅该地址。 |
+| `--video-port` | `5004` | `5004` | 视频 RTP 端口，两端一致。 |
+| `--audio-port` | `0` | `0` | 0 表示无音频；若需音频则改为同一非零端口（如 5006）。 |
+| `--width` / `--height` | 1920 / 1080 | 1920 / 1080 | 分辨率必须一致。 |
+| `--no-ptp` | 使用 | 使用 | 禁用 PTP，用程序内部时间戳；两机都加则行为一致。 |
+
+**固定两台电脑 IP（重启后不消失）**
+
+项目内已提供 Netplan 配置，复制到系统后应用即可固定 IP，无需每次手动 `ip addr add`。
+
+- **发送端（本机，enp4s0）**：固定为 `192.168.10.1`
+- **接收端（enp6s0）**：固定为 `192.168.10.2`
+
+**发送端执行（本机）：**
+
+```bash
+cd /home/aa/GPT_mtl_encode_sdk
+sudo cp docs/netplan/99-st2110-sender-enp4s0.yaml /etc/netplan/
+sudo netplan apply
+```
+
+**接收端执行（在接收端机器上）：**
+
+```bash
+cd /path/to/GPT_mtl_encode_sdk   # 或把 99-st2110-receiver-enp6s0.yaml 拷到接收端任意目录
+sudo cp docs/netplan/99-st2110-receiver-enp6s0.yaml /etc/netplan/
+sudo netplan apply
+```
+
+完成后用 `ip -4 addr show enp4s0`（本机）和 `ip -4 addr show enp6s0`（接收端）确认 IP 已生效；重启后仍会保持，无需再执行上面的第一步、第二步临时配置。
+
+### 2.2 使用 DPDK/MTL 模式（双机直连）
+
+DPDK 模式需要：两台机器均完成 **IOMMU、大页、VFIO 权限、网卡绑定**，且 `--port` 使用网卡的 **BDF**（如 `0000:af:01.0`），`--sip` 仍为对应网口 IP。配置步骤见 [docs/DPDK_MTL_SETUP.md](DPDK_MTL_SETUP.md)。配置完成后，发送/接收示例：
+
+```bash
+# A 机（发送端，BDF 与 sip 按实际直连网卡修改）
+./st2110_send --url build/yuv420p10le_1080p.yuv --width 1920 --height 1080 \
+  --duration 30 --audio-port 0 --ip 239.0.0.1 --video-port 5004 \
+  --port 0000:af:01.0 --sip 192.168.10.1 --no-ptp
+
+# B 机（接收端，先启动）
+./st2110_record --ip 239.0.0.1 --video-port 5004 --audio-port 0 \
+  --width 1920 --height 1080 --max-frames 1800 recv.mp4 \
+  --port 0000:af:01.0 --sip 192.168.10.2 --no-ptp
+```
+
+若一机多 MTL 进程，需先在该机运行 `sudo MtlManager`（见 MTL 官方 Run Guide）。
+
 ---
 
 ## 三、参数对应
@@ -89,3 +222,31 @@
 | `kernel:lo` | Socket 回环 | 本机测试，PTP 通常不可用 |
 | `kernel:eth0` | Socket 物理网卡 | 跨机或本机物理网卡 |
 | `0000:af:01.0` | DPDK | 需网卡已绑定 DPDK（如 vfio-pci） |
+
+---
+
+## 七、故障排查
+
+### `SIOCGIFADDR fail` / `get ip fail from if enp3s0`
+
+使用 `--port kernel:enp3s0` 时，MTL 会从该网卡读取 IP 地址。若报错：
+
+- **网卡名错误**：本机可能不是 `enp3s0`。先查看实际网卡名：
+  ```bash
+  ip link show
+  # 或
+  ls /sys/class/net/
+  ```
+  然后用实际名称，例如 `--port kernel:eth0`，且 `--sip` 填该网卡上配置的 IP。
+
+- **网卡未配置 IP**：即使传了 `--sip 192.168.10.1`，MTL 仍会校验该 IP 是否属于指定网卡。需在对应网卡上配置好 IP，例如（发送端 A 机）：
+  ```bash
+  sudo ip addr add 192.168.10.1/24 dev enp3s0
+  ```
+  若用 DHCP，确认该网卡已拿到地址后再运行程序。
+
+- **本机回环测试**：不依赖物理网卡时，可用回环口：
+  ```bash
+  ./st2110_send ... --port kernel:lo --sip 127.0.0.1
+  ./st2110_record ... --port kernel:lo --sip 127.0.0.1
+  ```
