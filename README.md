@@ -89,7 +89,7 @@ cmake --build . -j
 **从 YUV 文件发送：**
 ```bash
 ./st2110_send --url /path/to/yuv420p10le_1080p.yuv --width 1920 --height 1080 --duration 30 --audio-port 0
-```
+````
 
 **双机（Kernel 模式）**：A 机 `st2110_send`，B 机 `st2110_record`，组播地址与端口一致，网络组播可达。详见 [docs/TESTING.md](docs/TESTING.md)。
 
