@@ -125,10 +125,10 @@ cd build
 
 在按 [docs/DPDK_MTL_SETUP.md](docs/DPDK_MTL_SETUP.md) 完成 **IOMMU、大页、VFIO 组、网卡绑定到 DPDK** 后，可以使用 DPDK/MTL 模式进行 ST2110 高性能收发。
 
-- **发送端（A 机）**：直连网卡 BDF 如 `0000:af:01.0`，本机 IP `192.168.10.1`
-- **接收端（B 机）**：直连网卡 BDF 如 `0000:af:01.0`，本机 IP `192.168.10.2`
+- **发送端（A 机）**：直连网卡 BDF 如 `0000:04:00.0`，本机 IP `192.168.10.1`
+- **接收端（B 机）**：直连网卡 BDF 如 `0000:06:00.0`，本机 IP `192.168.10.2`
 - **组播地址**：`239.0.0.1`，**视频端口**：`5004`
-- **YUV 文件**：`build/yuv420p10le_1080p.yuv`（1920×1080，59.94fps，示例自带）
+- **YUV 文件**：`yuv420p10le_1080p.yuv`（1920×1080，59.94fps，示例自带）
 - **说明**：`--port` 使用网卡 **BDF** 表示 DPDK 模式，`--sip` 为该直连网口的静态 IP。
 
 **接收端（B 机，先启动）：**
@@ -138,7 +138,7 @@ cd /path/to/GPT_mtl_encode_sdk/build
 
 ./st2110_record --ip 239.0.0.1 --video-port 5004 --audio-port 0 \
   --width 1920 --height 1080 --max-frames 1800 recv.mp4 \
-  --port 0000:af:01.0 --sip 192.168.10.2 --no-ptp
+  --port 0000:06:00.0 --sip 192.168.10.2 --no-ptp
 ```
 
 **发送端（A 机，后启动）：**
@@ -148,7 +148,7 @@ cd /path/to/GPT_mtl_encode_sdk/build
 
 ./st2110_send --url yuv420p10le_1080p.yuv --width 1920 --height 1080 \
   --duration 30 --audio-port 0 --ip 239.0.0.1 --video-port 5004 \
-  --port 0000:af:01.0 --sip 192.168.10.1 --no-ptp
+  --port 0000:04:00.0 --sip 192.168.10.1 --no-ptp
 ```
 
 > 若在项目根目录执行，将 `--url` 改为 `--url build/yuv420p10le_1080p.yuv`。  
