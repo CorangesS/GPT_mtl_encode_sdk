@@ -76,6 +76,7 @@ cmake --build . -j
 |------|------|
 | **st2110_send** | 发送 ST2110 组播 |
 | **st2110_record** | 接收组播并编码为 MP4 |
+| **av_txrx_demo** | 音视频收发统一示例，可指定 [docs/SDK_USAGE.md](docs/SDK_USAGE.md) 内全部参数（PTP、lcores、tasklets 等），DPDK 发送默认 `build/yuv420p10le_1080p.yuv`，见 `--mode send` / `--mode recv` |
 
 **本机回环测试**（先启动接收端再启动发送端，使用回环口 `kernel:lo`）：
 ```bash
@@ -190,6 +191,7 @@ cd /path/to/GPT_mtl_encode_sdk/build
 |------|------|
 | [需求.md](需求.md) | 详细需求 |
 | [docs/README.md](docs/README.md) | 文档导航 |
+| [docs/SDK_USAGE.md](docs/SDK_USAGE.md) | **mtl_sdk / encode_sdk 上层应用使用**（PTPv2、跑满网卡参数） |
 | [docs/COMPLIANCE.md](docs/COMPLIANCE.md) | 需求符合性检查 |
 | [docs/TESTING.md](docs/TESTING.md) | 本机/双机测试、参数、frame_cnt 说明 |
 | [docs/DPDK_MTL_SETUP.md](docs/DPDK_MTL_SETUP.md) | 双机直连下 DPDK/MTL 配置（IOMMU、大页、VFIO、网卡绑定） |

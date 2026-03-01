@@ -2,6 +2,7 @@
 
 | 文档 | 内容 |
 |------|------|
+| [SDK_USAGE.md](SDK_USAGE.md) | **mtl_sdk / encode_sdk 上层应用使用说明**（PTPv2、跑满网卡参数、接入方式） |
 | [COMPLIANCE.md](COMPLIANCE.md) | 需求符合性逐项检查 |
 | [TESTING.md](TESTING.md) | 本机/双机收发测试、PTP/端口模式、frame_cnt、参数说明 |
 | [ROUTING.md](ROUTING.md) | NMOS 路由管理与 MTL-Encode-SDK 对接 |
