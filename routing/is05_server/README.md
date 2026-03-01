@@ -45,8 +45,31 @@ Controller 访问 `http://<本机IP>/admin`，对自研 Receiver 执行「连接
 | GET/PATCH | .../single/senders/{id}/staged | Sender 待生效（STAGED） |
 | GET | .../single/senders/{id}/active | Sender 已生效（ACTIVE） |
 | GET | .../single/senders/{id}/transportfile | SDP 传输文件（TRANSPORT FILE） |
+| GET | .../single/receivers/{id}/constraints | RTP 约束（CONNECT 时参数校验） |
+
+## Receiver 的 ACTIVE / STAGED / CONNECT
+
+在 Easy-NMOS 的 **Receivers** 界面中，每个 Receiver 支持：
+
+- **ACTIVE**：GET 当前已生效连接（sender_id、master_enable、activation、transport_params、transport_file）。连接后此处会显示实际 Sender 与传输参数。
+- **STAGED**：GET 当前待生效配置；PATCH 可提交新连接（如选择 Sender、传入 transport_file 或 transport_params，并设置 `activation.mode: "activate_immediate"` 立即激活）。
+- **CONNECT**：Controller 会先拉取 Sender 列表与各 Sender 的 **transportfile**（SDP），再对 Receiver 的 **staged** 发起 PATCH（sender_id + transport_file + activation），完成「选择已有 Sender 并连接」。
+
+本服务已实现：
+
+- **constraints**：返回 RTP 单路约束（interface_ip、destination_port、source_ip、multicast_ip、rtp_enabled），便于 Controller 展示/校验 CONNECT 参数。
+- **transport_file**：支持 `{ "data": "<SDP 字符串>", "type": "application/sdp" }` 或直接传 SDP 字符串；连接时会从 SDP 解析并写入 connection_state.json，同时推导 transport_params 供 ACTIVE/STAGED 展示。
+
+在 Receiver 节点界面手动连接已有 Sender 的流程：点 **CONNECT** → 选择要连接的 Sender → Controller 会取该 Sender 的 transportfile 并 PATCH 到本 Receiver 的 staged（含 activate_immediate）→ 本服务解析 SDP、写入 connection_state.json，收流 daemon 即可按新连接收流。
 
 ## 依赖
 
 - Python 3.6+
 - Flask：`pip install flask`（或 `pip install -r requirements.txt`）
+
+## 出现 "no api found" 或 Sender/Receiver 无 ACTIVE/TRANSPORT FILE/CONNECT 时
+
+1. **节点根与 Node API**：部分 Controller（如 Easy-NMOS）会先请求节点根 `GET http://<node>:port/`，期望得到 IS-04 Node API base 数组 `["self/", "sources/", "flows/", "devices/", "senders/", "receivers/"]`，并可能继续请求 `/self/`、`/devices/` 等。本服务已实现这些桩路由，返回 200 与最小合法 JSON，避免因 404 导致 "no api found"。请确保 **`--save-config` 写入的 `.nmos_node.json` 含有 `node_id`、`device_id`**（注册脚本已自动写入）。
+2. **Sender/Receiver 机器必须运行本 IS-05 服务**：在对应机器上执行 `python3 routing/is05_server/app.py`，且 `.nmos_node.json` 中有对应的 `sender_id` 或 `receiver_id`（用 `--mode sender` 或 `--mode receiver` 并 `--save-config` 注册一次即可）。
+3. **Connection API 基路径**：Controller 会请求 `GET http://<node>:port/x-nmos/connection/v1.1/`，本服务已实现并返回 `["bulk/", "single/"]`，否则会 404 导致不显示按钮。
+4. **跨域**：若 admin 在浏览器中从 Easy-NMOS 主机（如 192.168.1.200）打开，浏览器会跨域请求节点地址，本服务已加 CORS 头。若仍被拦截，请确认防火墙放行对应端口，且从 admin 所在机器能访问节点根与 `.../x-nmos/connection/v1.1/`。

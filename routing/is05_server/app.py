@@ -19,6 +19,22 @@ except ImportError:
 
 app = Flask(__name__)
 
+
+@app.after_request
+def _cors_headers(response):
+    """允许 Easy-NMOS 从其他主机打开 admin 时，浏览器能跨域访问本节点 IS-05。"""
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "GET, PATCH, POST, OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    return response
+
+
+@app.route("/", methods=["OPTIONS"])
+@app.route("/<path:path>", methods=["OPTIONS"])
+def _cors_preflight(path=""):
+    return "", 204
+
+
 # Receiver ID must match IS-04 registration (from .nmos_node.json or env)
 CONFIG_FILE = os.environ.get("NMOS_NODE_CONFIG", ".nmos_node.json")
 CONNECTION_STATE_FILE = os.environ.get("CONNECTION_STATE_FILE", "connection_state.json")
@@ -60,6 +76,34 @@ def _load_sender_id():
     return None
 
 
+def _load_node_id():
+    nid = os.environ.get("NMOS_NODE_ID")
+    if nid:
+        return nid
+    if os.path.isfile(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                return data.get("node_id")
+        except Exception:
+            pass
+    return None
+
+
+def _load_device_id():
+    did = os.environ.get("NMOS_DEVICE_ID")
+    if did:
+        return did
+    if os.path.isfile(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                return data.get("device_id")
+        except Exception:
+            pass
+    return None
+
+
 def _parse_sdp_media(sdp_text):
     """Extract first video and first audio media from SDP text (minimal parser)."""
     video = None
@@ -95,6 +139,44 @@ def _parse_sdp_media(sdp_text):
     return video, audio
 
 
+def _sdp_text_from_transport_file(tf):
+    """从 PATCH body 的 transport_file 取出 SDP 字符串。支持 { data, type } 或纯字符串。"""
+    if tf is None:
+        return ""
+    if isinstance(tf, str):
+        return tf.strip()
+    if isinstance(tf, dict):
+        return (tf.get("data") or "").strip()
+    return ""
+
+
+def _transport_params_from_sdp(sdp_text):
+    """从 SDP 解析出 IS-05 Receiver 单路 transport_params（用于 STAGED/ACTIVE 展示）。"""
+    video, audio = _parse_sdp_media(sdp_text)
+    leg = dict(_default_rtp_receiver_transport_params()[0])
+    leg["rtp_enabled"] = True
+    if video:
+        leg["destination_port"] = video.get("udp_port", 5004)
+        ip = video.get("ip", "0.0.0.0")
+        if ip and ip != "0.0.0.0":
+            leg["multicast_ip"] = ip if _is_multicast_ip(ip) else None
+            if not leg["multicast_ip"]:
+                leg["source_ip"] = ip
+    return [leg]
+
+
+def _is_multicast_ip(ip):
+    """简单判断是否为 IPv4 组播地址（224.0.0.0–239.255.255.255）。"""
+    try:
+        parts = ip.split(".")
+        if len(parts) != 4:
+            return False
+        first = int(parts[0])
+        return 224 <= first <= 239
+    except (ValueError, AttributeError):
+        return False
+
+
 def _parse_patch_body(body):
     """Return (video_dict, audio_dict) from transport_params or transport_file."""
     video = None
@@ -112,28 +194,26 @@ def _parse_patch_body(body):
             "height": 1080,
             "fps": 59.94,
         }
-    tf = body.get("transport_file")
-    if tf and isinstance(tf, dict):
-        sdp_data = tf.get("data") or ""
-        if sdp_data:
-            v, a = _parse_sdp_media(sdp_data)
-            if v:
-                video = {
-                    "ip": v["endpoint"]["ip"],
-                    "udp_port": v["endpoint"]["udp_port"],
-                    "payload_type": v["endpoint"].get("payload_type", 96),
-                    "width": v.get("width", 1920),
-                    "height": v.get("height", 1080),
-                    "fps": v.get("fps", 59.94),
-                }
-            if a:
-                audio = {
-                    "ip": a["endpoint"]["ip"],
-                    "udp_port": a["endpoint"]["udp_port"],
-                    "payload_type": a["endpoint"].get("payload_type", 97),
-                    "sample_rate": a.get("sample_rate", 48000),
-                    "channels": a.get("channels", 2),
-                }
+    sdp_data = _sdp_text_from_transport_file(body.get("transport_file"))
+    if sdp_data:
+        v, a = _parse_sdp_media(sdp_data)
+        if v:
+            video = {
+                "ip": v["endpoint"]["ip"],
+                "udp_port": v["endpoint"]["udp_port"],
+                "payload_type": v["endpoint"].get("payload_type", 96),
+                "width": v.get("width", 1920),
+                "height": v.get("height", 1080),
+                "fps": v.get("fps", 59.94),
+            }
+        if a:
+            audio = {
+                "ip": a["endpoint"]["ip"],
+                "udp_port": a["endpoint"]["udp_port"],
+                "payload_type": a["endpoint"].get("payload_type", 97),
+                "sample_rate": a.get("sample_rate", 48000),
+                "channels": a.get("channels", 2),
+            }
     return video, audio
 
 
@@ -151,13 +231,86 @@ def _write_connection_state(receiver_id, master_enable, sender_id, video, audio)
     return path
 
 
-# ---- Node API base (GET /)：部分 Controller 会先探测节点根路径 ----
+# ---- Node API base (GET /)：Easy-NMOS 等 Controller 会先 GET 节点根，期望 IS-04 nodeapi-base 格式，否则报 "no api found" ----
+# 规范示例 nodeapi-base-get-200：返回 ["self/", "sources/", "flows/", "devices/", "senders/", "receivers/"]
 @app.route("/", methods=["GET"])
 def node_base():
-    """返回 Node API 根，便于 Controller 发现本节点可用。"""
+    """返回 Node API 根（IS-04 格式），便于 Controller 识别本节点并继续用 device.controls 发现 Connection API。"""
+    return jsonify(["self/", "sources/", "flows/", "devices/", "senders/", "receivers/"])
+
+
+# ---- Node API 桩路由：Controller 可能接着请求这些路径验证节点，任一 404 会导致 "no api found" ----
+@app.route("/self/", methods=["GET"])
+@app.route("/self", methods=["GET"])
+def node_self():
+    """IS-04 Node API self：返回本节点资源（最小字段），供 Controller 校验节点可用。"""
+    nid = _load_node_id()
+    if not nid:
+        return jsonify({"error": "node_id not configured"}), 500
     return jsonify({
-        "connection": {"href": "x-nmos/connection/v1.1/", "version": "v1.1"},
+        "id": nid,
+        "version": "0:0",
+        "label": "MTL SDK Node",
+        "description": "MTL encode SDK IS-05 node",
+        "tags": {},
+        "api": {"endpoints": [{"host": "0.0.0.0", "port": PORT, "protocol": "http"}]},
+        "services": [],
+        "clocks": [],
+        "interfaces": [{"name": "eth0", "chassis_id": "00-00-00-00-00-00", "port_id": "00-00-00-00-00-01"}],
     })
+
+
+@app.route("/devices/", methods=["GET"])
+@app.route("/devices", methods=["GET"])
+def node_devices():
+    """IS-04 Node API devices：返回设备 ID 列表。"""
+    did = _load_device_id()
+    if not did:
+        return jsonify([])
+    return jsonify([f"{did}/"])
+
+
+@app.route("/senders/", methods=["GET"])
+@app.route("/senders", methods=["GET"])
+def node_senders():
+    """IS-04 Node API senders：返回 sender ID 列表。"""
+    sid = _load_sender_id()
+    if not sid:
+        return jsonify([])
+    return jsonify([f"{sid}/"])
+
+
+@app.route("/receivers/", methods=["GET"])
+@app.route("/receivers", methods=["GET"])
+def node_receivers():
+    """IS-04 Node API receivers：返回 receiver ID 列表。"""
+    rid = _load_receiver_id()
+    if not rid:
+        return jsonify([])
+    return jsonify([f"{rid}/"])
+
+
+@app.route("/sources/", methods=["GET"])
+@app.route("/sources", methods=["GET"])
+def node_sources():
+    """IS-04 Node API sources：本服务不暴露 source 详情，返回空列表即可。"""
+    return jsonify([])
+
+
+@app.route("/flows/", methods=["GET"])
+@app.route("/flows", methods=["GET"])
+def node_flows():
+    """IS-04 Node API flows：本服务不暴露 flow 详情，返回空列表即可。"""
+    return jsonify([])
+
+
+# ---- IS-05 Connection API 基路径：Controller 会 GET 此 URL 探测节点是否支持 IS-05 ----
+# Device.controls[].href = http://<node>:9090/x-nmos/connection/v1.1/ ，必须返回 200 才能显示 ACTIVE/TRANSPORT FILE
+@app.route("/x-nmos/connection/v1.1/", methods=["GET"])
+@app.route("/x-nmos/connection/v1.1", methods=["GET"])
+def connection_api_base():
+    """IS-05 v1.1 基路径，返回 bulk/ 与 single/，与规范 base-get-200 一致。"""
+    return jsonify(["bulk/", "single/"])
 
 
 # ---- IS-05 routes ----
@@ -187,6 +340,7 @@ def get_receiver_sub(receiver_id_path):
     return jsonify(["staged/", "active/", "constraints/", "transporttype/"])
 
 
+@app.route(f"{BASE}/receivers/<path:receiver_id_path>/staged/", methods=["GET"])
 @app.route(f"{BASE}/receivers/<path:receiver_id_path>/staged", methods=["GET"])
 def get_staged(receiver_id_path):
     rid = receiver_id_path.rstrip("/")
@@ -195,6 +349,7 @@ def get_staged(receiver_id_path):
     return jsonify(_staged.get(rid, _default_staged(rid)))
 
 
+@app.route(f"{BASE}/receivers/<path:receiver_id_path>/staged/", methods=["PATCH"])
 @app.route(f"{BASE}/receivers/<path:receiver_id_path>/staged", methods=["PATCH"])
 def patch_staged(receiver_id_path):
     rid = receiver_id_path.rstrip("/")
@@ -205,23 +360,31 @@ def patch_staged(receiver_id_path):
     mode = activation.get("mode")
 
     staged = _staged.get(rid, _default_staged(rid))
-    staged["sender_id"] = body.get("sender_id")
-    staged["master_enable"] = body.get("master_enable", True)
+    staged["sender_id"] = body.get("sender_id") if "sender_id" in body else staged.get("sender_id")
+    staged["master_enable"] = body.get("master_enable", True) if "master_enable" in body else staged.get("master_enable", True)
     staged["activation"] = activation
     if "transport_params" in body:
         staged["transport_params"] = body["transport_params"]
     if "transport_file" in body:
         staged["transport_file"] = body["transport_file"]
+        # 若未提供 transport_params，从 SDP 推导便于 ACTIVE/STAGED 界面展示
+        if "transport_params" not in body:
+            sdp_text = _sdp_text_from_transport_file(body["transport_file"])
+            if sdp_text:
+                staged["transport_params"] = _transport_params_from_sdp(sdp_text)
     _staged[rid] = staged
 
     if mode == "activate_immediate":
         activation_time = f"{int(time.time() * 1e9)}:0"
         video, audio = _parse_patch_body(body)
+        tp = staged.get("transport_params")
+        if not tp or (isinstance(tp, list) and len(tp) == 0):
+            tp = _default_rtp_receiver_transport_params()
         _active[rid] = {
             "sender_id": staged["sender_id"],
             "master_enable": staged["master_enable"],
             "activation": {"mode": "activate_immediate", "requested_time": None, "activation_time": activation_time},
-            "transport_params": staged.get("transport_params"),
+            "transport_params": tp,
             "transport_file": staged.get("transport_file"),
         }
         staged["activation"]["mode"] = "activate_immediate"
@@ -237,16 +400,30 @@ def patch_staged(receiver_id_path):
     return jsonify(staged), 200
 
 
+def _default_rtp_receiver_transport_params():
+    """IS-05 RTP Receiver 单路默认参数，便于 Controller 识别为 RTP 而非 Unknown Type。"""
+    return [
+        {
+            "interface_ip": "auto",
+            "destination_port": "auto",
+            "rtp_enabled": False,
+            "source_ip": None,
+            "multicast_ip": None,
+        }
+    ]
+
+
 def _default_staged(rid):
     return {
         "sender_id": None,
         "master_enable": False,
         "activation": {"mode": None, "requested_time": None, "activation_time": None},
-        "transport_params": [],
+        "transport_params": _default_rtp_receiver_transport_params(),
         "transport_file": None,
     }
 
 
+@app.route(f"{BASE}/receivers/<path:receiver_id_path>/active/", methods=["GET"])
 @app.route(f"{BASE}/receivers/<path:receiver_id_path>/active", methods=["GET"])
 def get_active(receiver_id_path):
     rid = receiver_id_path.rstrip("/")
@@ -255,14 +432,29 @@ def get_active(receiver_id_path):
     return jsonify(_active.get(rid, _default_staged(rid)))
 
 
+def _receiver_rtp_constraints():
+    """IS-05 RTP Receiver 约束：单路，便于 Controller 在 CONNECT 时展示/校验参数。"""
+    return [
+        {
+            "interface_ip": {"enum": ["auto"], "description": "Network interface for RTP receive"},
+            "destination_port": {"minimum": 1, "maximum": 65535, "description": "RTP destination port"},
+            "source_ip": {},
+            "multicast_ip": {},
+            "rtp_enabled": {"enum": [True, False]},
+        }
+    ]
+
+
+@app.route(f"{BASE}/receivers/<path:receiver_id_path>/constraints/", methods=["GET"])
 @app.route(f"{BASE}/receivers/<path:receiver_id_path>/constraints", methods=["GET"])
 def get_constraints(receiver_id_path):
     rid = receiver_id_path.rstrip("/")
     if rid != _load_receiver_id():
         return jsonify({"error": "receiver not found"}), 404
-    return jsonify([])
+    return jsonify(_receiver_rtp_constraints())
 
 
+@app.route(f"{BASE}/receivers/<path:receiver_id_path>/transporttype/", methods=["GET"])
 @app.route(f"{BASE}/receivers/<path:receiver_id_path>/transporttype", methods=["GET"])
 def get_transporttype(receiver_id_path):
     rid = receiver_id_path.rstrip("/")
@@ -272,12 +464,25 @@ def get_transporttype(receiver_id_path):
 
 
 # ---------- Sender 端 IS-05（STAGED / ACTIVE / TRANSPORTFILE）----------
+def _default_rtp_sender_transport_params():
+    """IS-05 RTP Sender 默认参数，便于 Controller 识别为 RTP 而非 Unknown Type。"""
+    return [
+        {
+            "source_ip": "auto",
+            "destination_ip": "auto",
+            "source_port": "auto",
+            "destination_port": "auto",
+            "rtp_enabled": False,
+        }
+    ]
+
+
 def _default_sender_staged(sid):
     return {
         "receiver_id": None,
         "master_enable": False,
         "activation": {"mode": None, "requested_time": None, "activation_time": None},
-        "transport_params": [],
+        "transport_params": _default_rtp_sender_transport_params(),
     }
 
 
@@ -313,6 +518,7 @@ def get_sender_sub(sender_id_path):
     return jsonify(["staged/", "active/", "constraints/", "transportfile/", "transporttype/"])
 
 
+@app.route(f"{BASE}/senders/<path:sender_id_path>/staged/", methods=["GET"])
 @app.route(f"{BASE}/senders/<path:sender_id_path>/staged", methods=["GET"])
 def get_sender_staged(sender_id_path):
     sid = sender_id_path.rstrip("/")
@@ -321,6 +527,7 @@ def get_sender_staged(sender_id_path):
     return jsonify(_sender_staged.get(sid, _default_sender_staged(sid)))
 
 
+@app.route(f"{BASE}/senders/<path:sender_id_path>/staged/", methods=["PATCH"])
 @app.route(f"{BASE}/senders/<path:sender_id_path>/staged", methods=["PATCH"])
 def patch_sender_staged(sender_id_path):
     sid = sender_id_path.rstrip("/")
@@ -340,11 +547,14 @@ def patch_sender_staged(sender_id_path):
 
     if mode == "activate_immediate":
         activation_time = f"{int(time.time() * 1e9)}:0"
+        tp = staged.get("transport_params")
+        if not tp or (isinstance(tp, list) and len(tp) == 0):
+            tp = _default_rtp_sender_transport_params()
         _sender_active[sid] = {
             "receiver_id": staged["receiver_id"],
             "master_enable": staged["master_enable"],
             "activation": {"mode": "activate_immediate", "requested_time": None, "activation_time": activation_time},
-            "transport_params": staged.get("transport_params", []),
+            "transport_params": tp,
         }
         staged["activation"]["mode"] = "activate_immediate"
         staged["activation"]["activation_time"] = activation_time
@@ -352,6 +562,7 @@ def patch_sender_staged(sender_id_path):
     return jsonify(staged), 200
 
 
+@app.route(f"{BASE}/senders/<path:sender_id_path>/active/", methods=["GET"])
 @app.route(f"{BASE}/senders/<path:sender_id_path>/active", methods=["GET"])
 def get_sender_active(sender_id_path):
     sid = sender_id_path.rstrip("/")
@@ -360,6 +571,7 @@ def get_sender_active(sender_id_path):
     return jsonify(_sender_active.get(sid, _default_sender_staged(sid)))
 
 
+@app.route(f"{BASE}/senders/<path:sender_id_path>/transportfile/", methods=["GET"])
 @app.route(f"{BASE}/senders/<path:sender_id_path>/transportfile", methods=["GET"])
 def get_sender_transportfile(sender_id_path):
     sid = sender_id_path.rstrip("/")
@@ -380,6 +592,7 @@ def get_sender_transportfile(sender_id_path):
     return Response(sdp, mimetype="application/sdp")
 
 
+@app.route(f"{BASE}/senders/<path:sender_id_path>/constraints/", methods=["GET"])
 @app.route(f"{BASE}/senders/<path:sender_id_path>/constraints", methods=["GET"])
 def get_sender_constraints(sender_id_path):
     sid = sender_id_path.rstrip("/")
@@ -388,6 +601,7 @@ def get_sender_constraints(sender_id_path):
     return jsonify([])
 
 
+@app.route(f"{BASE}/senders/<path:sender_id_path>/transporttype/", methods=["GET"])
 @app.route(f"{BASE}/senders/<path:sender_id_path>/transporttype", methods=["GET"])
 def get_sender_transporttype(sender_id_path):
     sid = sender_id_path.rstrip("/")
