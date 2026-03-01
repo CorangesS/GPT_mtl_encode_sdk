@@ -6,6 +6,8 @@
 #include "encode_sdk/encode_sdk.hpp"
 
 #include <iostream>
+#include <ctime>
+#include <cerrno>
 #include <cstring>
 #include <cmath>
 #include <fstream>
@@ -28,6 +30,7 @@ static void usage(const char* prog) {
             << "  --tasklets <n>          每 scheduler tasklet 数，0=自动（可试 16）\n"
             << "  --data-quota-mbs <n>    每 lcore 数据配额 MB/s，0=自动\n"
             << "  --no-ptp                禁用 PTP，用合成时间戳\n"
+            << "  --ptp-system            以系统时间为 PTP 源（先 ptp4l+phc2sys 同步）；不走网卡 PTP\n"
             << "  --bind-numa <0|1>       是否绑定 NUMA，默认 1\n"
             << "  流参数（收发一致）：\n"
             << "  --ip <multicast_ip>      组播 IP（默认 239.0.0.1）\n"
@@ -132,11 +135,11 @@ private:
 int run_send(mtl_sdk::Context* ctx, int argc, char** argv,
   const std::string& port_name, const std::string& sip, const std::string& lcores,
   int main_lcore, uint32_t tasklets_nb_per_sch, uint32_t data_quota_mbs_per_sch,
-  bool use_ptp, int tx_queues, int rx_queues, bool bind_numa);
+  bool use_ptp_timestamps, bool use_ptp_system, int tx_queues, int rx_queues, bool bind_numa);
 int run_recv(mtl_sdk::Context* ctx, int argc, char** argv,
   const std::string& port_name, const std::string& sip, const std::string& lcores,
   int main_lcore, uint32_t tasklets_nb_per_sch, uint32_t data_quota_mbs_per_sch,
-  bool use_ptp, int tx_queues, int rx_queues, bool bind_numa);
+  bool use_ptp_timestamps, bool use_ptp_system, int tx_queues, int rx_queues, bool bind_numa);
 
 int main(int argc, char** argv) {
   std::string mode;
@@ -147,6 +150,7 @@ int main(int argc, char** argv) {
   uint32_t tasklets_nb_per_sch = 0;
   uint32_t data_quota_mbs_per_sch = 0;
   bool use_ptp = true;
+  bool use_ptp_system = false;  // use system time (ptp4l+phc2sys) as PTP source
   int tx_queues = -1, rx_queues = -1;
   bool bind_numa = true;
 
@@ -160,6 +164,7 @@ int main(int argc, char** argv) {
     if (a == "--tasklets" && i + 1 < argc) { tasklets_nb_per_sch = (uint32_t)atoi(argv[++i]); continue; }
     if (a == "--data-quota-mbs" && i + 1 < argc) { data_quota_mbs_per_sch = (uint32_t)atoi(argv[++i]); continue; }
     if (a == "--no-ptp") { use_ptp = false; continue; }
+    if (a == "--ptp-system") { use_ptp_system = true; continue; }
     if (a == "--tx-queues" && i + 1 < argc) { tx_queues = atoi(argv[++i]); continue; }
     if (a == "--rx-queues" && i + 1 < argc) { rx_queues = atoi(argv[++i]); continue; }
     if (a == "--bind-numa" && i + 1 < argc) { bind_numa = (atoi(argv[++i]) != 0); continue; }
@@ -176,12 +181,21 @@ int main(int argc, char** argv) {
   cfg.ports.push_back({port_name, sip});
   cfg.tx_queues = tx_queues >= 0 ? tx_queues : (mode == "send" ? 1 : 0);
   cfg.rx_queues = rx_queues >= 0 ? rx_queues : (mode == "recv" ? 1 : 0);
-  cfg.enable_builtin_ptp = use_ptp;
+  cfg.enable_builtin_ptp = use_ptp && !use_ptp_system;  // no NIC PTP when using system time
   cfg.bind_numa = bind_numa;
   cfg.lcores = lcores;
   cfg.main_lcore = main_lcore;
   cfg.tasklets_nb_per_sch = tasklets_nb_per_sch;
   cfg.data_quota_mbs_per_sch = data_quota_mbs_per_sch;
+
+  if (use_ptp_system) {
+    cfg.ptp_mode = mtl_sdk::PtpMode::ExternalFn;
+    cfg.external_ptp_time_fn = []() -> mtl_sdk::TimestampNs {
+      struct timespec ts;
+      if (clock_gettime(CLOCK_REALTIME, &ts) != 0) return 0;
+      return (mtl_sdk::TimestampNs)ts.tv_sec * 1000000000LL + (mtl_sdk::TimestampNs)ts.tv_nsec;
+    };
+  }
 
   auto ctx = mtl_sdk::Context::create(cfg);
   if (!ctx) {
@@ -193,11 +207,12 @@ int main(int argc, char** argv) {
     return 1;
   }
 
+  bool use_ptp_timestamps = use_ptp || use_ptp_system;
   int ret = 0;
   if (mode == "send")
-    ret = run_send(ctx.get(), argc, argv, port_name, sip, lcores, main_lcore, tasklets_nb_per_sch, data_quota_mbs_per_sch, use_ptp, cfg.tx_queues, cfg.rx_queues, bind_numa);
+    ret = run_send(ctx.get(), argc, argv, port_name, sip, lcores, main_lcore, tasklets_nb_per_sch, data_quota_mbs_per_sch, use_ptp_timestamps, use_ptp_system, cfg.tx_queues, cfg.rx_queues, bind_numa);
   else
-    ret = run_recv(ctx.get(), argc, argv, port_name, sip, lcores, main_lcore, tasklets_nb_per_sch, data_quota_mbs_per_sch, use_ptp, cfg.tx_queues, cfg.rx_queues, bind_numa);
+    ret = run_recv(ctx.get(), argc, argv, port_name, sip, lcores, main_lcore, tasklets_nb_per_sch, data_quota_mbs_per_sch, use_ptp_timestamps, use_ptp_system, cfg.tx_queues, cfg.rx_queues, bind_numa);
 
   ctx->stop();
   return ret;
@@ -206,9 +221,9 @@ int main(int argc, char** argv) {
 int run_send(mtl_sdk::Context* ctx, int argc, char** argv,
   const std::string& port_name, const std::string& sip, const std::string& lcores,
   int main_lcore, uint32_t tasklets_nb_per_sch, uint32_t data_quota_mbs_per_sch,
-  bool use_ptp, int tx_queues, int rx_queues, bool bind_numa)
+  bool use_ptp_timestamps, bool use_ptp_system, int tx_queues, int rx_queues, bool bind_numa)
 {
-  (void)port_name;(void)sip;(void)lcores;(void)main_lcore;(void)tasklets_nb_per_sch;(void)data_quota_mbs_per_sch;(void)tx_queues;(void)rx_queues;(void)bind_numa;
+  (void)port_name;(void)sip;(void)lcores;(void)main_lcore;(void)tasklets_nb_per_sch;(void)data_quota_mbs_per_sch;(void)tx_queues;(void)rx_queues;(void)bind_numa;(void)use_ptp_system;
   std::string ip = "239.0.0.1";
   std::string url = "build/yuv420p10le_1080p.yuv";
   std::string fmt_str = "yuv420p10le";
@@ -291,11 +306,12 @@ int run_send(mtl_sdk::Context* ctx, int argc, char** argv,
 
   const int total_video_frames = (int)(fps * duration_sec);
   const int64_t frame_ns = (int64_t)(1e9 / fps);
-  bool ptp_valid = use_ptp;
-  if (ptp_valid && ctx->now_ptp_ns() == 0) {
+  bool ptp_valid = use_ptp_timestamps;
+  if (ptp_valid && !use_ptp_system && ctx->now_ptp_ns() == 0) {
     ptp_valid = false;
     std::cout << "PTP unavailable, using synthetic timestamps\n";
-  } else if (!use_ptp) std::cout << "PTP disabled\n";
+  } else if (use_ptp_system) std::cout << "PTP source: system time (ptp4l+phc2sys)\n";
+  else if (!use_ptp_timestamps) std::cout << "PTP disabled\n";
 
   mtl_sdk::VideoFrame frame;
   frame.fmt = vf;
@@ -399,9 +415,9 @@ int run_send(mtl_sdk::Context* ctx, int argc, char** argv,
 int run_recv(mtl_sdk::Context* ctx, int argc, char** argv,
   const std::string& port_name, const std::string& sip, const std::string& lcores,
   int main_lcore, uint32_t tasklets_nb_per_sch, uint32_t data_quota_mbs_per_sch,
-  bool use_ptp, int tx_queues, int rx_queues, bool bind_numa)
+  bool use_ptp_timestamps, bool use_ptp_system, int tx_queues, int rx_queues, bool bind_numa)
 {
-  (void)port_name;(void)sip;(void)lcores;(void)main_lcore;(void)tasklets_nb_per_sch;(void)data_quota_mbs_per_sch;(void)tx_queues;(void)rx_queues;(void)bind_numa;
+  (void)port_name;(void)sip;(void)lcores;(void)main_lcore;(void)tasklets_nb_per_sch;(void)data_quota_mbs_per_sch;(void)tx_queues;(void)rx_queues;(void)bind_numa;(void)use_ptp_system;
   std::string ip = "239.0.0.1";
   std::string sdp_path;
   std::string out = "out.mp4";
@@ -469,7 +485,8 @@ int run_recv(mtl_sdk::Context* ctx, int argc, char** argv,
     }
   }
 
-  if (!use_ptp) std::cout << "PTP disabled\n";
+  if (!use_ptp_timestamps) std::cout << "PTP disabled\n";
+  else if (use_ptp_system) std::cout << "PTP source: system time (ptp4l+phc2sys)\n";
   else if (ctx->now_ptp_ns() == 0) std::cout << "PTP unavailable, receiver will use synthetic timestamps\n";
 
   mtl_sdk::VideoFormat vf;

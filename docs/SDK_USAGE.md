@@ -52,6 +52,32 @@ ctx->start();
 - **PTP**：`enable_builtin_ptp = true` 即满足需求中的「视频流和音频流收发均支持 PTPv2」。
 - **CPU/性能**：`lcores`、`tasklets_nb_per_sch`、`data_quota_mbs_per_sch` 用于让收发尽量占用更多 CPU、跑满网卡能力；示例程序通过命令行 `--lcores`、`--tasklets`、`--data-quota-mbs` 传入并写入 `MtlSdkConfig`。
 
+### 2.2.1 PTP 两种用法（与 MTL 文档对应）
+
+MTL 文档说明：
+
+- **Built-in PTP 开启**（`MTL_FLAG_PTP_ENABLE`）：PTP 时钟来自 **网卡硬件时钟（NIC time）**，需网卡支持且与 PTP grandmaster 同步；精度可达约 30ns。本 SDK 中对应 `enable_builtin_ptp = true`（默认），不传 `--no-ptp` 即启用。部分网卡（如 i226-V 在 DPDK 下）可能不支持或需额外配置，启用后若崩溃可改用下方「系统时钟 + ptp4l」。
+- **Built-in PTP 关闭**：PTP 时钟来自 **用户应用提供的时钟**。MTL 默认用系统时间（如 `clock_gettime`）。做法是：网络中部署 PTP grandmaster，本机用 **ptp4l** 将网卡 PHC 与 grandmaster 同步，再用 **phc2sys** 将 PHC 同步到系统时间，收发程序使用 **系统时钟** 作为时间戳来源，即等价于“通过系统时间使用 PTP”。
+
+**在收发程序中可以这样设置 PTP：**
+
+| 方式 | 说明 | 收发程序用法 |
+|------|------|--------------|
+| **内置 PTP（网卡时钟）** | 网卡硬件与 grandmaster 同步，MTL 读 NIC 时间 | 不加 `--no-ptp`（默认）。若网卡不支持会回退或崩溃，如 i226-V 建议用下一种。 |
+| **系统时钟（ptp4l + phc2sys）** | 先让系统时间与 grandmaster 同步，程序用 `clock_gettime` 作为 PTP 源 | 先按下方步骤配置 ptp4l/phc2sys，再在程序中加 **`--ptp-system`**，时间戳将使用已同步的系统时间。 |
+
+**Linux ptp4l + phc2sys 与系统时间同步（供 `--ptp-system` 使用）：**
+
+1. 用 ptp4l 将本机 **PHC（PTP 硬件时钟）** 与 grandmaster 同步（接口名按实际修改，如 `enp4s0`）：
+   ```bash
+   sudo ptp4l -i enp4s0 -m -s -H
+   ```
+2. 用 phc2sys 将 **PHC 同步到系统时间**（需关闭 NTP 以免冲突）：
+   ```bash
+   sudo phc2sys -s enp4s0 -m -w
+   ```
+3. 收发程序加上 **`--ptp-system`**，不再使用网卡内置 PTP，而是用已同步的系统时间作为 `ctx->now_ptp_ns()` 的源，从而在收发中“使用 PTP”（通过系统时间间接实现）。
+
 ### 2.3 发送端（TX）示例片段
 
 ```cpp
@@ -205,3 +231,22 @@ session->push_video(copy.to_video_frame());  // copy 中保留 timestamp_ns
 ```
 
 若在项目根目录运行发送端，将 `--url` 改为 `build/yuv420p10le_1080p.yuv` 或使用绝对路径。完整选项见 `av_txrx_demo --help`。
+
+### 6.3 使用 PTP（系统时间：ptp4l + phc2sys）
+
+当网卡内置 PTP 不可用（如 i226-V 启用后段错误）时，可先用 ptp4l + phc2sys 将系统时间与 grandmaster 同步，再用 **`--ptp-system`** 让收发程序以系统时间为时间戳源：
+
+```bash
+# 1) 本机先同步系统时间（接口名按实际修改，如 enp4s0；若该网卡已绑 DPDK，可用另一块网卡做 PTP）
+sudo ptp4l -i enp4s0 -m -s -H
+sudo phc2sys -s enp4s0 -m -w   # 需关闭 NTP
+
+# 2) 发送端
+./av_txrx_demo --mode send --port 0000:04:00.0 --sip 192.168.10.1 \
+  --url build/yuv420p10le_1080p.yuv --ip 239.0.0.1 --video-port 5004 \
+  --lcores 0-15 --tasklets 16 --ptp-system
+
+# 3) 接收端
+./av_txrx_demo --mode recv --port 0000:06:00.0 --sip 192.168.10.2 \
+  --ip 239.0.0.1 --video-port 5004 --max-frames 1800 --lcores 0-15 --tasklets 16 --ptp-system recv.mp4
+```
