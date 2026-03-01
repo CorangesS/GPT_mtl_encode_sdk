@@ -7,4 +7,4 @@
 | `99-st2110-sender-enp4s0.yaml` | 发送端（本机） | enp4s0 | 192.168.10.1/24 |
 | `99-st2110-receiver-enp6s0.yaml` | 接收端 | enp6s0 | 192.168.10.2/24 |
 
-**用法**：将对应文件复制到 `/etc/netplan/` 后执行 `sudo netplan apply`。详见 [TESTING.md §2.1.1](../TESTING.md)。
+**用法**：将对应文件复制到 `/etc/netplan/` 后执行 `sudo netplan apply`。详见 [需求1_视频流收发部署与使用.md §1.5](../需求1_视频流收发部署与使用.md)。

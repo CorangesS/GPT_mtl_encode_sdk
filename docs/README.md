@@ -1,16 +1,21 @@
 # 文档导航
 
-| 文档 | 内容 |
-|------|------|
-| [SDK_USAGE.md](SDK_USAGE.md) | **mtl_sdk / encode_sdk 上层应用使用说明**（PTPv2、跑满网卡参数、接入方式） |
-| [COMPLIANCE.md](COMPLIANCE.md) | 需求符合性逐项检查 |
-| [TESTING.md](TESTING.md) | 本机/双机收发测试、PTP/端口模式、frame_cnt、参数说明 |
-| [ROUTING.md](ROUTING.md) | NMOS 路由管理与 MTL-Encode-SDK 对接 |
-| [EASY_NMOS_IMPLEMENTATION.md](EASY_NMOS_IMPLEMENTATION.md) | **路由管理实现指南（基于 Easy-NMOS）** |
-| [EASY_NMOS_QUICK_START.md](EASY_NMOS_QUICK_START.md) | **Easy-NMOS 快速使用**（以 192.168.1.200 为例，自研/外购发现与需求对照） |
-| [RECEIVER_CONNECT_TROUBLESHOOTING.md](RECEIVER_CONNECT_TROUBLESHOOTING.md) | **自研 Receiver 无法在 admin 中 Connect/Active/Staged 的原因与解决** |
-| [ROUTING_REQUIREMENTS_COMPLIANCE.md](ROUTING_REQUIREMENTS_COMPLIANCE.md) | 需求 17、18 条路由管理符合性检查 |
-| [NMOS_JS_DEPLOY.md](NMOS_JS_DEPLOY.md) | NMOS-JS 部署与配置（nmos-cpp 单独部署时使用） |
-| [../tests/README.md](../tests/README.md) | 测试套件说明（需求符合性测试） |
+本目录说明 **需求.md** 中三项需求的**部署与使用**：视频流收发、编码 SDK、路由管理。
 
-**当前实现要点**：基于标准 MTL 库；示例支持 `--port`（kernel/DPDK）、`--no-ptp`；PTP 不可用时自动回退；Easy-NMOS 集成见 [EASY_NMOS_IMPLEMENTATION.md](EASY_NMOS_IMPLEMENTATION.md)。
+---
+
+## 需求与文档对应
+
+| 需求 | 文档 | 内容概要 |
+|------|------|----------|
+| **需求1** 视频流收发（PTPv2、SDP） | [需求1_视频流收发部署与使用.md](需求1_视频流收发部署与使用.md) | 本地回环测试、双机 Kernel 模式、双机 DPDK 模式；**网卡配置与查看命令**；网卡被 DPDK 绑定后恢复 Kernel 等意外情况处理 |
+| **需求2** 编码 SDK（H.264/H.265、MP4/MXF 等） | [需求2_编码SDK部署与使用.md](需求2_编码SDK部署与使用.md) | 编码 SDK 如何被使用：EncodeParams、Session、push_video/push_audio、与收流对接、时间戳同步 |
+| **需求3** 路由管理（NMOS、发现与连接） | [需求3_路由管理部署与使用.md](需求3_路由管理部署与使用.md) | 如何运行项目中的路由管理部分；单机/双机角色；如何在双机上完成需求测试（注册、IS-05、admin 连接） |
+
+---
+
+## 其他
+
+| 文档/目录 | 说明 |
+|-----------|------|
+| [netplan/README.md](netplan/README.md) | 双机 ST2110 固定 IP 配置（Netplan），用于发送端/接收端网卡 IP 固定、重启不丢失。配合需求1 双机 Kernel 使用。 |

@@ -76,7 +76,7 @@ cmake --build . -j
 |------|------|
 | **st2110_send** | 发送 ST2110 组播 |
 | **st2110_record** | 接收组播并编码为 MP4 |
-| **av_txrx_demo** | 音视频收发统一示例，可指定 [docs/SDK_USAGE.md](docs/SDK_USAGE.md) 内全部参数（PTP、lcores、tasklets 等），DPDK 发送默认 `build/yuv420p10le_1080p.yuv`，见 `--mode send` / `--mode recv` |
+| **av_txrx_demo** | 音视频收发统一示例，支持 PTP、lcores、tasklets 等；DPDK 发送默认 `build/yuv420p10le_1080p.yuv`，见 `--mode send` / `--mode recv` |
 
 **本机回环测试**（先启动接收端再启动发送端，使用回环口 `kernel:lo`）：
 ```bash
@@ -120,11 +120,11 @@ cd build
   --port kernel:enp4s0 --sip 192.168.10.1 --no-ptp
 ```
 
-> 若在 `build` 目录下执行，发送端可用 `--url yuv420p10le_1080p.yuv`。更多双机说明见 [docs/TESTING.md](docs/TESTING.md)。
+> 若在 `build` 目录下执行，发送端可用 `--url yuv420p10le_1080p.yuv`。网卡配置、双机 Kernel/DPDK 流程及故障排查见 [docs/需求1_视频流收发部署与使用.md](docs/需求1_视频流收发部署与使用.md)。
 
 #### 双机收发（DPDK 模式，高性能）
 
-在按 [docs/DPDK_MTL_SETUP.md](docs/DPDK_MTL_SETUP.md) 完成 **IOMMU、大页、VFIO 组、网卡绑定到 DPDK** 后，可以使用 DPDK/MTL 模式进行 ST2110 高性能收发。
+在按 [docs/需求1_视频流收发部署与使用.md](docs/需求1_视频流收发部署与使用.md) 完成 **IOMMU、大页、VFIO、网卡绑定到 DPDK** 后，可使用网卡 BDF 进行 ST2110 高性能收发。
 
 - **发送端（A 机）**：直连网卡 BDF 如 `0000:04:00.0`，本机 IP `192.168.10.1`
 - **接收端（B 机）**：直连网卡 BDF 如 `0000:06:00.0`，本机 IP `192.168.10.2`
@@ -191,14 +191,9 @@ cd /path/to/GPT_mtl_encode_sdk/build
 |------|------|
 | [需求.md](需求.md) | 详细需求 |
 | [docs/README.md](docs/README.md) | 文档导航 |
-| [docs/SDK_USAGE.md](docs/SDK_USAGE.md) | **mtl_sdk / encode_sdk 上层应用使用**（PTPv2、跑满网卡参数） |
-| [docs/COMPLIANCE.md](docs/COMPLIANCE.md) | 需求符合性检查 |
-| [docs/TESTING.md](docs/TESTING.md) | 本机/双机测试、参数、frame_cnt 说明 |
-| [docs/DPDK_MTL_SETUP.md](docs/DPDK_MTL_SETUP.md) | 双机直连下 DPDK/MTL 配置（IOMMU、大页、VFIO、网卡绑定） |
-| [docs/ROUTING.md](docs/ROUTING.md) | NMOS 路由对接 |
-| [docs/EASY_NMOS_IMPLEMENTATION.md](docs/EASY_NMOS_IMPLEMENTATION.md) | **路由管理实现指南（Easy-NMOS）** |
-| [docs/IS05_SERVER_IMPLEMENTATION.md](docs/IS05_SERVER_IMPLEMENTATION.md) | **自研节点 IS-05 服务端实现详解** |
-| [docs/NMOS_JS_DEPLOY.md](docs/NMOS_JS_DEPLOY.md) | NMOS-JS 部署与配置 |
+| [docs/需求1_视频流收发部署与使用.md](docs/需求1_视频流收发部署与使用.md) | **需求1** 本地回环、双机 Kernel/DPDK、网卡配置与查看、DPDK 解绑回 Kernel |
+| [docs/需求2_编码SDK部署与使用.md](docs/需求2_编码SDK部署与使用.md) | **需求2** 编码 SDK 使用方式（EncodeParams、Session、与收流对接） |
+| [docs/需求3_路由管理部署与使用.md](docs/需求3_路由管理部署与使用.md) | **需求3** 路由管理运行方式与双机测试流程 |
 | [routing/README.md](routing/README.md) | 路由模块说明 |
 
 ## 八、路由管理快速开始（Easy-NMOS）
@@ -212,7 +207,7 @@ python3 routing/is05_server/app.py &        # IS-05 服务（可选，使 Contro
 ./build/is05_receiver_daemon &               # 或 ./build/st2110_record ... 收流编码
 ```
 
-或仅注册 + 手动收流：`routing/scripts/run_with_nmos.sh`。IS-05 服务端与 daemon 说明见 [routing/is05_server/README.md](routing/is05_server/README.md)。详见 [docs/EASY_NMOS_IMPLEMENTATION.md](docs/EASY_NMOS_IMPLEMENTATION.md)。
+或仅注册 + 手动收流：`routing/scripts/run_with_nmos.sh`。IS-05 服务端与 daemon 说明见 [routing/is05_server/README.md](routing/is05_server/README.md)。详见 [docs/需求3_路由管理部署与使用.md](docs/需求3_路由管理部署与使用.md)。
 
 ## 九、测试
 
