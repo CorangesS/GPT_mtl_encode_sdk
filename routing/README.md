@@ -33,9 +33,10 @@
    - 若用 **nmos-cpp 单独部署**：需部署 [nmos-js](https://github.com/sony/nmos-js) 并配置 Registry Base URL，详见 [../docs/NMOS_JS_DEPLOY.md](../docs/NMOS_JS_DEPLOY.md)。
 
 3. **自研节点接入**  
-   - 运行 `scripts/register_node_example.py` 向 Registry 注册 Node/Device/Receiver；支持 `--heartbeat` 保持注册有效；使用 `--save-config .nmos_node.json` 可保存 receiver_id 供 IS-05 服务读取。  
+   - 运行 `scripts/register_node_example.py` 向 Registry 注册；`--mode receiver`（默认）/`sender`/`both` 分别注册仅接收、仅发送、收发一体节点；支持 `--heartbeat`；`--href` 需为从浏览器可达的节点地址（否则 admin 中无法对自研 Receiver 做 Connect），`--save-config .nmos_node.json` 供 IS-05 读取 receiver_id。  
    - 可选：使用 `scripts/run_with_nmos.sh` 在收流时同时进行 NMOS 注册。  
-   - **IS-05 服务端**：运行 `is05_server/app.py` 提供 Connection API；收到 PATCH 激活时写入 connection_state.json，由 C++ 程序 `is05_receiver_daemon` 读取并驱动 MTL `create_video_rx`。详见 [is05_server/README.md](is05_server/README.md) 与 [../docs/IS05_SERVER_IMPLEMENTATION.md](../docs/IS05_SERVER_IMPLEMENTATION.md)。
+   - **IS-05 服务端**：运行 `is05_server/app.py` 提供 Connection API；收到 PATCH 激活时写入 connection_state.json，由 C++ 程序 `is05_receiver_daemon` 读取并驱动 MTL `create_video_rx`。详见 [is05_server/README.md](is05_server/README.md) 与 [../docs/IS05_SERVER_IMPLEMENTATION.md](../docs/IS05_SERVER_IMPLEMENTATION.md)。  
+   - 自研 Receiver 在 admin 中无法操作 Active/Staged/Connect 的排查见 [../docs/RECEIVER_CONNECT_TROUBLESHOOTING.md](../docs/RECEIVER_CONNECT_TROUBLESHOOTING.md)。
 
 4. **外购 ST2110 设备**  
    将其配置为向同一 Registry 注册，即可在 Controller 中与自研节点一起发现、连接与管理。
@@ -46,7 +47,7 @@
 
 | 脚本/服务 | 说明 |
 |----------|------|
-| `scripts/register_node_example.py` | 向 Registry 注册 Node/Device/Receiver；`--heartbeat` 保持注册有效；`--save-config PATH` 保存 node/receiver 信息供 IS-05 使用。 |
+| `scripts/register_node_example.py` | 向 Registry 注册 Node/Device/Receiver（及可选 Sender）；`--mode receiver\|sender\|both`；`--heartbeat`；`--href` 需浏览器可达；`--save-config PATH` 供 IS-05 使用。 |
 | `scripts/run_with_nmos.sh` | 在后台启动 NMOS 注册，并运行 st2110_record 收流编码。 |
 | **is05_server/** | IS-05 Connection API 服务端（Python）；PATCH 激活时写 connection_state.json，供 is05_receiver_daemon 驱动 MTL RX。见 [is05_server/README.md](is05_server/README.md)。 |
 

@@ -30,25 +30,35 @@
 
 ```bash
 cd /path/to/GPT_mtl_encode_sdk
-
-# 指定 Registry 地址（你的 Easy-NMOS）
 export REGISTRY_URL=http://192.168.1.200
 
-# 一次性注册
+# 一次性注册（默认 --mode receiver）
 python3 routing/scripts/register_node_example.py
 
-# 或带心跳，保持注册有效（推荐，另开终端长期运行）
-python3 routing/scripts/register_node_example.py --heartbeat --interval 30
+# 或带心跳 + 若要在 admin 里对该 Receiver 做 Connect/Staged/Active，必须用 --href 指向本机可达地址 + --save-config
+python3 routing/scripts/register_node_example.py --heartbeat --interval 30 \
+  --href http://192.168.1.201:9090/ --save-config .nmos_node.json
 ```
 
-脚本会向 `http://192.168.1.200` 注册一个 Node、Device、Receiver（视频接收能力）。注册成功后，在 **http://192.168.1.200/admin** 的 **Nodes / Receivers** 中应能看到该节点。
+将上面的 `192.168.1.201` 换成**运行注册脚本和 IS-05 服务的那台机器的 IP**（从打开 admin 的浏览器所在网络要能访问）。注册成功后，在 **http://192.168.1.200/admin** 的 **Nodes / Receivers** 中应能看到该节点。
 
-### 2.2 注册「发送节点」（可选，若要把 st2110_send / av_txrx_demo send 也纳入管理）
+**若在 admin 里无法对自研 Receiver 做 Connect/Active/Staged**：多半是 `--href` 不可达（如用了默认 127.0.0.1 且从别处打开 admin）或未运行 IS-05 服务。详见 [RECEIVER_CONNECT_TROUBLESHOOTING.md](RECEIVER_CONNECT_TROUBLESHOOTING.md)。
 
-当前 `register_node_example.py` 主要注册**接收**能力。若需在 Controller 里也看到**自研发送端**，需要：
+### 2.2 注册「发送节点」或「收发一体节点」（需求3 自研发送SDK端）
 
-- 使用或扩展注册脚本，向同一 Registry 注册带 **Sender** 的 Node/Device（参见 `routing/` 下 README 或 IS-04 文档），或  
-- 使用 **nmos-virtnode**（192.168.1.201）自带的虚拟 Sender 做「发现、连接」演示。
+若要在 Controller 里也看到**自研发送端**（Sender），使用 `--mode sender` 或 `--mode both`：
+
+```bash
+export REGISTRY_URL=http://192.168.1.200
+
+# 仅发送节点（Node + Device + Source + Flow + Sender）
+python3 routing/scripts/register_node_example.py --mode sender --heartbeat --interval 30 \
+  --href http://<本机IP>:9090/
+
+# 同一节点同时带 Receiver 与 Sender（需求3 完整：自研收发端都在 admin 可见）
+python3 routing/scripts/register_node_example.py --mode both --heartbeat --interval 30 \
+  --href http://<本机IP>:9090/ --save-config .nmos_node.json
+```
 
 只要自研的 Node 向 **REGISTRY_URL=http://192.168.1.200** 注册，就会和 virtnode、外购设备一起在 Controller 里被**发现**。
 
@@ -105,4 +115,5 @@ python3 routing/scripts/register_node_example.py --heartbeat --interval 30
 | 5 | 实际收发仍用 `st2110_record` / `st2110_send` 或 `av_txrx_demo` 命令行参数；NMOS 用于发现与（实现 IS-05 后的）连接驱动。 |
 | 6 | 外购设备：将其 Registry 配置为 http://192.168.1.200，即可在 admin 中与自研节点一起发现、连接与管理。 |
 
-更多细节见 [EASY_NMOS_IMPLEMENTATION.md](EASY_NMOS_IMPLEMENTATION.md)、[ROUTING.md](ROUTING.md)。
+更多细节见 [EASY_NMOS_IMPLEMENTATION.md](EASY_NMOS_IMPLEMENTATION.md)、[ROUTING.md](ROUTING.md)。  
+自研 Receiver 无法在 admin 中 Connect/Active/Staged 的排查见 [RECEIVER_CONNECT_TROUBLESHOOTING.md](RECEIVER_CONNECT_TROUBLESHOOTING.md)。

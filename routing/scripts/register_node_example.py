@@ -91,20 +91,28 @@ def _parse_href(href):
         return "127.0.0.1", 9090, "http"
 
 
-def make_resources(node_href, node_hostname):
-    """生成 IS-04 Node/Device/Receiver 资源（符合 IS-04 v1.3 schema）。"""
+def make_resources(node_href, node_hostname, mode="receiver"):
+    """生成 IS-04 资源（符合 IS-04 v1.3 schema）。
+
+    mode: "receiver" = 仅接收节点; "sender" = 仅发送节点; "both" = 同一节点同时带 Receiver 与 Sender。
+    """
     node_id = str(uuid.uuid4())
     device_id = str(uuid.uuid4())
-    receiver_id = str(uuid.uuid4())
+    receiver_id = str(uuid.uuid4()) if mode in ("receiver", "both") else None
+    source_id = str(uuid.uuid4()) if mode in ("sender", "both") else None
+    flow_id = str(uuid.uuid4()) if mode in ("sender", "both") else None
+    sender_id = str(uuid.uuid4()) if mode in ("sender", "both") else None
+
     t = int(time.time())
     v = f"{t}:0"
 
     host, port, protocol = _parse_href(node_href)
+    node_label = "MTL-Encode-SDK Node (Receiver)" if mode == "receiver" else "MTL-Encode-SDK Node (Sender)" if mode == "sender" else "MTL-Encode-SDK Node (RX+TX)"
     node = {
         "id": node_id,
         "version": v,
-        "label": "MTL-Encode-SDK Node (Receiver)",
-        "description": "MTL-Encode-SDK node for ST2110 receive and encode",
+        "label": node_label,
+        "description": "MTL-Encode-SDK node for ST2110 receive/send and encode",
         "tags": {},
         "href": node_href,
         "hostname": node_hostname,
@@ -122,30 +130,76 @@ def make_resources(node_href, node_hostname):
     device = {
         "id": device_id,
         "version": v,
-        "label": "ST2110 RX + Encode Device",
-        "description": "ST2110 receive and encode device",
+        "label": "ST2110 RX + Encode Device" if mode == "receiver" else "ST2110 TX Device" if mode == "sender" else "ST2110 RX+TX Device",
+        "description": "ST2110 receive/send and encode device",
         "tags": {},
         "node_id": node_id,
-        "receivers": [receiver_id],
-        "senders": [],
+        "receivers": [receiver_id] if receiver_id else [],
+        "senders": [sender_id] if sender_id else [],
         "type": "urn:x-nmos:device:generic",
         "controls": [],
     }
-    # Receiver 必须符合 receiver_video + receiver_core：transport、interface_bindings 必需
-    receiver = {
-        "id": receiver_id,
-        "version": v,
-        "label": "Video Receiver (ST2110)",
-        "description": "MTL SDK video RX; IS-05 activation drives St2110Endpoint",
-        "tags": {},
-        "device_id": device_id,
-        "format": "urn:x-nmos:format:video",
-        "caps": {"media_types": ["video/raw"]},
-        "transport": "urn:x-nmos:transport:rtp.ucast",
-        "interface_bindings": ["eth0"],
-        "subscription": {"sender_id": None, "active": False},
-    }
-    return node, device, receiver, node_id, device_id, receiver_id
+    receiver = None
+    if receiver_id:
+        receiver = {
+            "id": receiver_id,
+            "version": v,
+            "label": "Video Receiver (ST2110)",
+            "description": "MTL SDK video RX; IS-05 activation drives St2110Endpoint",
+            "tags": {},
+            "device_id": device_id,
+            "format": "urn:x-nmos:format:video",
+            "caps": {"media_types": ["video/raw"]},
+            "transport": "urn:x-nmos:transport:rtp.ucast",
+            "interface_bindings": ["eth0"],
+            "subscription": {"sender_id": None, "active": False},
+        }
+
+    source = None
+    flow = None
+    sender = None
+    if source_id and flow_id and sender_id:
+        source = {
+            "id": source_id,
+            "version": v,
+            "label": "ST2110 Video Source",
+            "description": "MTL SDK video source for ST2110 send",
+            "tags": {},
+            "device_id": device_id,
+            "format": "urn:x-nmos:format:video",
+            "grain_rate": {"numerator": 60000, "denominator": 1001},
+        }
+        flow = {
+            "id": flow_id,
+            "version": v,
+            "label": "Video Flow (ST2110)",
+            "description": "ST2110 video flow from MTL TX",
+            "tags": {},
+            "device_id": device_id,
+            "source_id": source_id,
+            "parents": [],
+            "grain_rate": {"numerator": 60000, "denominator": 1001},
+            "format": "urn:x-nmos:format:video",
+            "frame_width": 1920,
+            "frame_height": 1080,
+            "colorspace": "BT709",
+            "media_type": "video/raw",
+        }
+        sender = {
+            "id": sender_id,
+            "version": v,
+            "label": "Video Sender (ST2110)",
+            "description": "MTL SDK video TX; IS-05 can configure destination",
+            "tags": {},
+            "device_id": device_id,
+            "flow_id": flow_id,
+            "transport": "urn:x-nmos:transport:rtp.ucast",
+            "manifest_href": None,
+            "interface_bindings": ["eth0"],
+            "subscription": {"receiver_id": None, "active": False},
+        }
+
+    return node, device, receiver, source, flow, sender, node_id, device_id, receiver_id, source_id, flow_id, sender_id
 
 
 def detect_registration_base(base):
@@ -180,23 +234,29 @@ def detect_registration_base(base):
     return f"{root}/v1.2"
 
 
-def register_once(reg_base, node, device, receiver):
+def register_once(reg_base, node, device, receiver, source=None, flow=None, sender=None):
     """执行一次注册。
 
-    根据 IS-04 规范，通过 Registration API 的通用 /resource 端点注册不同类型资源，
-    而不是访问 /resource/nodes 这类路径。
+    根据 IS-04 规范，通过 Registration API 的通用 /resource 端点注册不同类型资源。
+    注册顺序：Node → Device → Source（若有）→ Flow（若有）→ Receiver（若有）→ Sender（若有）。
     """
     resource_url = f"{reg_base}/resource"
 
-    # 按顺序注册 Node、Device、Receiver，避免引用未注册的资源。
     post(resource_url, {"type": "node", "data": node})
     post(resource_url, {"type": "device", "data": device})
-    post(resource_url, {"type": "receiver", "data": receiver})
+    if source:
+        post(resource_url, {"type": "source", "data": source})
+    if flow:
+        post(resource_url, {"type": "flow", "data": flow})
+    if receiver:
+        post(resource_url, {"type": "receiver", "data": receiver})
+    if sender:
+        post(resource_url, {"type": "sender", "data": sender})
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Register MTL-Encode-SDK Node/Device/Receiver to NMOS Registry (IS-04)"
+        description="Register MTL-Encode-SDK Node/Device/Receiver (and optional Sender) to NMOS Registry (IS-04)"
     )
     parser.add_argument(
         "--heartbeat",
@@ -210,9 +270,15 @@ def main():
         help="Heartbeat interval in seconds (default: 10)",
     )
     parser.add_argument(
+        "--mode",
+        choices=["receiver", "sender", "both"],
+        default="receiver",
+        help="Register receiver-only, sender-only, or both (default: receiver). 'sender'/'both' add Source+Flow+Sender for 需求3 自研发送SDK端.",
+    )
+    parser.add_argument(
         "--href",
         default="http://127.0.0.1:9090/",
-        help="Node href for IS-05 (default: http://127.0.0.1:9090/)",
+        help="Node href for IS-05; must be reachable from browser (e.g. http://<node-ip>:9090/)",
     )
     parser.add_argument(
         "--hostname",
@@ -223,39 +289,50 @@ def main():
         "--save-config",
         metavar="PATH",
         default=None,
-        help="Save node_id, device_id, receiver_id, href, hostname to JSON file for IS-05 server (e.g. .nmos_node.json)",
+        help="Save node_id, device_id, receiver_id, sender_id, href, hostname to JSON for IS-05 (e.g. .nmos_node.json)",
     )
     args = parser.parse_args()
 
     base = os.environ.get("REGISTRY_URL", "http://127.0.0.1").rstrip("/")
     reg_base = detect_registration_base(base)
 
-    node, device, receiver, nid, did, rid = make_resources(args.href, args.hostname)
+    node, device, receiver, source, flow, sender, nid, did, rid, sid_src, fid, sid = make_resources(
+        args.href, args.hostname, args.mode
+    )
 
     # 首次注册
-    print("Registering Node...")
+    print("Registering Node (mode=%s)..." % args.mode)
     print("Registry base:", base)
     print("Registration API:", reg_base)
     try:
-        register_once(reg_base, node, device, receiver)
+        register_once(reg_base, node, device, receiver, source, flow, sender)
     except Exception as e:
         print("Failed to register:", e, file=sys.stderr)
         sys.exit(1)
 
-    print("Done. Node:", nid, "Receiver:", rid)
+    print("Done. Node:", nid, end="")
+    if rid:
+        print(" Receiver:", rid, end="")
+    if sid:
+        print(" Sender:", sid, end="")
+    print()
     print("Controller:", base + "/admin")
     if args.save_config:
         config = {
             "node_id": nid,
             "device_id": did,
-            "receiver_id": rid,
             "href": args.href,
             "hostname": args.hostname,
         }
+        if rid:
+            config["receiver_id"] = rid
+        if sid:
+            config["sender_id"] = sid
         with open(args.save_config, "w", encoding="utf-8") as f:
             json.dump(config, f, indent=2)
         print("Saved config to:", args.save_config)
-    print("To make connections drive MTL SDK, run IS-05 server: python3 routing/is05_server/app.py")
+    if rid:
+        print("To make connections drive MTL SDK, run IS-05 server: python3 routing/is05_server/app.py")
 
     if not args.heartbeat:
         return
@@ -278,9 +355,16 @@ def main():
         v = f"{t}:0"
         node["version"] = v
         device["version"] = v
-        receiver["version"] = v
+        if receiver:
+            receiver["version"] = v
+        if source:
+            source["version"] = v
+        if flow:
+            flow["version"] = v
+        if sender:
+            sender["version"] = v
         try:
-            register_once(reg_base, node, device, receiver)
+            register_once(reg_base, node, device, receiver, source, flow, sender)
             print("[%s] Heartbeat OK" % time.strftime("%H:%M:%S"))
         except Exception as e:
             print("[%s] Heartbeat failed: %s" % (time.strftime("%H:%M:%S"), e), file=sys.stderr)
