@@ -6,6 +6,7 @@
 #include <functional>
 #include <cstring>
 #include <stdexcept>
+#include <string>
 
 /*
   Real MTL backend.
@@ -439,6 +440,13 @@ public:
     }
     p.tx_queues_cnt[MTL_PORT_P] = cfg_.tx_queues;
     p.rx_queues_cnt[MTL_PORT_P] = cfg_.rx_queues;
+    if (!cfg_.lcores.empty()) {
+      lcores_str_ = cfg_.lcores;
+      p.lcores = &lcores_str_[0];
+    }
+    if (cfg_.main_lcore >= 0) p.main_lcore = (uint32_t)cfg_.main_lcore;
+    p.tasklets_nb_per_sch = cfg_.tasklets_nb_per_sch;
+    p.data_quota_mbs_per_sch = cfg_.data_quota_mbs_per_sch;
     st_ = mtl_init(&p);
     if (!st_) throw std::runtime_error("mtl_init failed");
   }
@@ -490,6 +498,7 @@ private:
   MtlSdkConfig cfg_;
   mtl_handle st_{};
   PtpGetTimeFn ptp_fn_;
+  std::string lcores_str_;  // keep lcores string alive for mtl_init_params.lcores
 };
 
 std::unique_ptr<IMtlBackend> create_backend_mtl(const MtlSdkConfig& cfg) {

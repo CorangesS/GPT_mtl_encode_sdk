@@ -26,7 +26,11 @@ static void usage(const char* prog) {
             << "  --fps <fps>             Default: 59.94 (match sender)\n"
             << "  --max-frames <n>        Stop after N video frames (default: 600)\n"
             << "  --no-ptp                Disable PTP, use synthetic timestamps (fallback when NIC lacks PTP)\n"
-            << "  --sdp <file>            Load SDP file to derive IP/ports/format (overrides --ip/--video-port/--audio-port/--width/--height/--fps)\n";
+            << "  --sdp <file>            Load SDP file to derive IP/ports/format (overrides --ip/--video-port/--audio-port/--width/--height/--fps)\n"
+            << "  --lcores <list>         DPDK lcores for MTL, e.g. 0-3 or 2,3,4,5 (faster RX)\n"
+            << "  --main-lcore <id>       Main lcore id (default: MTL auto)\n"
+            << "  --tasklets <n>          Tasklets per lcore; 0=auto (try 16 if slow)\n"
+            << "  --data-quota-mbs <n>    Max data quota MB/s per lcore; 0=auto\n";
 }
 
 // Copy of video frame data for async pipeline (release RX buffer immediately after copy)
@@ -126,6 +130,10 @@ int main(int argc, char** argv) {
   double fps = 59.94;
   int max_frames = 600;
   bool use_ptp = true;
+  std::string lcores;
+  int main_lcore = -1;
+  uint32_t tasklets_nb_per_sch = 0;
+  uint32_t data_quota_mbs_per_sch = 0;
 
   for (int i = 1; i < argc; i++) {
     std::string a = argv[i];
@@ -140,6 +148,10 @@ int main(int argc, char** argv) {
     if (a == "--max-frames" && i + 1 < argc) { max_frames = atoi(argv[++i]); continue; }
     if (a == "--no-ptp") { use_ptp = false; continue; }
     if (a == "--sdp" && i + 1 < argc) { sdp_path = argv[++i]; continue; }
+    if (a == "--lcores" && i + 1 < argc) { lcores = argv[++i]; continue; }
+    if (a == "--main-lcore" && i + 1 < argc) { main_lcore = atoi(argv[++i]); continue; }
+    if (a == "--tasklets" && i + 1 < argc) { tasklets_nb_per_sch = (uint32_t)atoi(argv[++i]); continue; }
+    if (a == "--data-quota-mbs" && i + 1 < argc) { data_quota_mbs_per_sch = (uint32_t)atoi(argv[++i]); continue; }
     if (a == "--help" || a == "-h") { usage(argv[0]); return 0; }
     if (a.compare(0, 2, "--") != 0) { out = a; continue; }
   }
@@ -213,6 +225,10 @@ int main(int argc, char** argv) {
   mtl_cfg.ports.push_back({port_name, sip});
   mtl_cfg.rx_queues = 1;
   mtl_cfg.enable_builtin_ptp = use_ptp;
+  mtl_cfg.lcores = lcores;
+  mtl_cfg.main_lcore = main_lcore;
+  mtl_cfg.tasklets_nb_per_sch = tasklets_nb_per_sch;
+  mtl_cfg.data_quota_mbs_per_sch = data_quota_mbs_per_sch;
 
   auto ctx = mtl_sdk::Context::create(mtl_cfg);
   if (!ctx) {

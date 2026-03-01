@@ -26,7 +26,11 @@ static void usage(const char* prog) {
             << "  --fps <fps>              Default: 59.94\n"
             << "  --duration <sec>         Run for N seconds (default: 10)\n"
             << "  --no-ptp                 Disable PTP, use synthetic timestamps (fallback when NIC lacks PTP)\n"
-            << "  --sdp-out <file>         Export SDP describing the video/audio streams to <file>\n";
+            << "  --sdp-out <file>         Export SDP describing the video/audio streams to <file>\n"
+            << "  --lcores <list>          DPDK lcores for MTL, e.g. 0-3 or 2,3,4,5 (faster TX)\n"
+            << "  --main-lcore <id>         Main lcore id (default: MTL auto)\n"
+            << "  --tasklets <n>           Tasklets per lcore; 0=auto (try 16 if build timeout)\n"
+            << "  --data-quota-mbs <n>     Max data quota MB/s per lcore; 0=auto\n";
 }
 
 // Convert yuv420p10le (3 planes) to yuv422p10le (3 planes).
@@ -64,6 +68,10 @@ int main(int argc, char** argv) {
   double fps = 59.94;
   int duration_sec = 10;
   bool use_ptp = true;
+  std::string lcores;
+  int main_lcore = -1;
+  uint32_t tasklets_nb_per_sch = 0;
+  uint32_t data_quota_mbs_per_sch = 0;
 
   for (int i = 1; i < argc; i++) {
     std::string a = argv[i];
@@ -80,6 +88,10 @@ int main(int argc, char** argv) {
     if (a == "--duration" && i + 1 < argc) { duration_sec = atoi(argv[++i]); continue; }
     if (a == "--no-ptp") { use_ptp = false; continue; }
     if (a == "--sdp-out" && i + 1 < argc) { sdp_out = argv[++i]; continue; }
+    if (a == "--lcores" && i + 1 < argc) { lcores = argv[++i]; continue; }
+    if (a == "--main-lcore" && i + 1 < argc) { main_lcore = atoi(argv[++i]); continue; }
+    if (a == "--tasklets" && i + 1 < argc) { tasklets_nb_per_sch = (uint32_t)atoi(argv[++i]); continue; }
+    if (a == "--data-quota-mbs" && i + 1 < argc) { data_quota_mbs_per_sch = (uint32_t)atoi(argv[++i]); continue; }
     if (a == "--help" || a == "-h") { usage(argv[0]); return 0; }
   }
 
@@ -88,6 +100,10 @@ int main(int argc, char** argv) {
   cfg.tx_queues = 1;
   cfg.rx_queues = 0;
   cfg.enable_builtin_ptp = use_ptp;
+  cfg.lcores = lcores;
+  cfg.main_lcore = main_lcore;
+  cfg.tasklets_nb_per_sch = tasklets_nb_per_sch;
+  cfg.data_quota_mbs_per_sch = data_quota_mbs_per_sch;
 
   auto ctx = mtl_sdk::Context::create(cfg);
   if (!ctx) {

@@ -32,6 +32,15 @@ struct MtlSdkConfig {
   int tx_queues = 0;
   int rx_queues = 0;
 
+  /** Optional. DPDK lcore list for MTL, e.g. "0-3" or "2,3,4,5". Empty = MTL default. */
+  std::string lcores;
+  /** Optional. Main lcore id; < 0 = not set (MTL default). */
+  int main_lcore = -1;
+  /** Optional. Tasklets per scheduler (lcore); 0 = MTL default. Can improve TX/RX throughput. */
+  uint32_t tasklets_nb_per_sch = 0;
+  /** Optional. Max data quota (MB/s) per scheduler; 0 = MTL default. */
+  uint32_t data_quota_mbs_per_sch = 0;
+
   PtpMode ptp_mode = PtpMode::BuiltInMtl;
   bool enable_builtin_ptp = true;    // maps to MTL_FLAG_PTP_ENABLE (when supported)
   int utc_offset_seconds = 37;       // help when external ptp source uses UTC (see MTL docs)

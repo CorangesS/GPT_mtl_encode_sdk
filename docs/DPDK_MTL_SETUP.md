@@ -70,13 +70,39 @@ sudo udevadm trigger
 
 ### 2.3 大页（Huge pages）
 
-每次重启后需重新配置（或写入启动脚本）。例如 2048 个 2MB 大页（约 4GB）：
+DPDK/MTL 使用大页减少 TLB 未命中、提升收发性能。**每次重启后需重新配置**（或写入启动脚本 / systemd）。
+
+**2M 大页**（最常用）：
 
 ```bash
+# 2048 个 2MB 页 ≈ 4GB（常规负载）
 sudo sysctl -w vm.nr_hugepages=2048
+
+# 高负载（如多路 1080p60、或遇内存分配失败）可增至 8GB
+sudo sysctl -w vm.nr_hugepages=4096
 ```
 
 若运行时报内存分配失败，可适当增大该值。
+
+**1G 大页**（可选，性能更好，需内核支持）：  
+若希望使用 1GB 大页（日志中 “No free 1048576 kB hugepages” 会消失），可分配 1G 大页（数量按需，例如 4 个 = 4GB）：
+
+```bash
+# 查看是否支持 1G 大页
+grep -E 'pdpe1gb|pse1gb' /proc/cpuinfo
+
+# 分配 1G 大页（例：4 个）
+echo 4 | sudo tee /sys/kernel/mm/hugepages/hugepages-1048576kB/nr_hugepages
+```
+
+**持久化**（重启后自动生效）：在 `/etc/sysctl.d/` 下新增配置文件（如 `90-hugepages.conf`）：
+
+```ini
+# 2M 大页，4GB
+vm.nr_hugepages = 2048
+```
+
+然后执行 `sudo sysctl -p /etc/sysctl.d/90-hugepages.conf` 或重启。
 
 ### 2.4 绑定网卡到 DPDK（VFIO）
 
@@ -135,7 +161,49 @@ CentOS/RHEL 等若以非 root 运行 MTL 报错，可在 `/etc/security/limits.c
 
 然后重新登录或重启。
 
-### 2.6 多 MTL 进程时运行 MtlManager
+### 2.6 CPU（lcore）与 Tasklet 配置
+
+MTL 的发送/接收由 DPDK **EAL** 管理的 **lcore** 上运行的 **tasklet** 完成。lcore 数量与分配影响吞吐和延迟。
+
+**DPDK EAL 常用参数**（需在进程启动时传入，由 MTL 内部转给 EAL）：
+
+| 参数 | 含义 | 示例 |
+|------|------|------|
+| `-l <corelist>` / `--lcores <list>` | 指定使用的 CPU 核（lcore 列表） | `--lcores 0-3` 使用 0、1、2、3 核 |
+| `-c <coremask>` | 用十六进制位掩码指定核 | `-c 0xf` 表示 0～3 核 |
+| `-m <MB>` | 预分配大页内存（MB） | `-m 1024` 预分配 1GB |
+| `--main-lcore <id>` | 主 lcore | `--main-lore 0` |
+
+**本 SDK 示例（st2110_send / st2110_record）**：已支持通过命令行传入 **lcore 与 tasklet** 参数，并写入 `mtl_init_params`，可提升发送/接收速度、缓解 “build timeout” 或 put_video 失败。
+
+| 参数 | 含义 | 示例 |
+|------|------|------|
+| `--lcores <list>` | 指定 MTL 使用的 DPDK lcore 列表 | `--lcores 0-3` 或 `--lcores 2,3,4,5` |
+| `--main-lcore <id>` | 主 lcore id；不设则 MTL 自动选择 | `--main-lcore 0` |
+| `--tasklets <n>` | 每个 lcore 的 tasklet 数；0=自动（遇 build timeout 可试 16） | `--tasklets 16` |
+| `--data-quota-mbs <n>` | 每个 lcore 最大数据配额（MB/s）；0=自动 | `--data-quota-mbs 4096` |
+
+**示例（DPDK 模式下发得更稳、更快）**：
+
+```bash
+# 发送端：固定 lcore 0,1,2,3，每 lcore 16 个 tasklet
+./st2110_send --url yuv420p10le_1080p.yuv --width 1920 --height 1080 \
+  --duration 30 --audio-port 0 --ip 239.0.0.1 --video-port 5004 \
+  --port 0000:04:00.0 --sip 192.168.10.1 --no-ptp \
+  --lcores 0-3 --tasklets 16
+
+# 接收端：同样指定 lcore 与 tasklet
+./st2110_record --ip 239.0.0.1 --video-port 5004 --audio-port 0 \
+  --width 1920 --height 1080 --max-frames 1800 recv.mp4 \
+  --port 0000:06:00.0 --sip 192.168.10.2 --no-ptp \
+  --lcores 0-3 --tasklets 16
+```
+
+大页仍按 §2.3 在系统侧配置（如 `vm.nr_hugepages=2048` 或 1G 大页）；EAL 的 `-m` 等参数由 MTL 内部使用，本示例通过 `--lcores`/`--tasklets` 等传递 lcore 与调度相关配置。
+
+**Tasklet**：MTL 内部用 **scheduler（sch）** 管理 tasklet（视频 TX/RX、转换等），每个 sch 绑定到若干 lcore。增加 `--tasklets` 可提高并发度；过多可能增加调度开销，可按实际负载调节。更多细节见 [MTL Run Guide](https://openvisualcloud.github.io/Media-Transport-Library/doc/run.html)。
+
+### 2.7 多 MTL 进程时运行 MtlManager
 
 若 **同一台机器** 上会运行多个 MTL 应用进程，需先在该机启动 MTL 的 Manager：
 
@@ -179,7 +247,8 @@ cd /path/to/GPT_mtl_encode_sdk/build
 
 ## 四、故障排查
 
-- **mtl_init 失败**：检查大页是否足够、是否已绑定 vfio、当前用户是否在 `vfio` 组、是否有 RLIMIT_MEMLOCK 限制。
+- **mtl_init 失败**：检查大页是否足够（§2.3，可试 4096 或 1G 大页）、是否已绑定 vfio、当前用户是否在 `vfio` 组、是否有 RLIMIT_MEMLOCK 限制。
+- **build timeout / put_video 失败**：多为发送队列积压，可增大大页（§2.3）、或为 MTL 指定更多/固定 lcore（§2.6，若所用 MTL 支持）。
 - **收不到包**：确认两机 `--ip`/`--video-port` 一致、`--sip` 为直连网口 IP、`--port` 为实际用于直连的 BDF；防火墙/组播路由在直连场景一般不需改。
 - **网卡绑定后无法 ping**：正常，DPDK 占用后内核不再使用该网卡；若需同时用该网卡 ping，请改用 Kernel 模式（`--port kernel:接口名`）。
 
