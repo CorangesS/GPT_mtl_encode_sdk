@@ -98,6 +98,8 @@ cmake --build . -j
 - **发送文件**：`build/yuv420p10le_1080p.yuv`（1920×1080）
 
 网络配置（任选其一）：
+ethtool enp4s0
+ethtool enp6s0
 - **临时**：发送端执行 `sudo ip addr add 192.168.10.1/24 dev enp4s0`；接收端执行 `sudo ip addr add 192.168.10.2/24 dev enp6s0`
 - **固定**：见 [docs/netplan/README.md](docs/netplan/README.md)，发送端用 `99-st2110-sender-enp4s0.yaml`，接收端用 `99-st2110-receiver-enp6s0.yaml`，然后 `sudo netplan apply`
 
@@ -105,7 +107,7 @@ cmake --build . -j
 ```bash
 cd build
 ./st2110_record --ip 239.0.0.1 --video-port 5004 --audio-port 0 \
-  --width 1920 --height 1080 --max-frames 1800 recv.mp4 \
+  --width 1920 --height 1080 --max-frames 200 recv.mp4 \
   --port kernel:enp6s0 --sip 192.168.10.2 --no-ptp
 ```
 
