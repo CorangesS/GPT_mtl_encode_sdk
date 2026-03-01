@@ -203,6 +203,20 @@ MTL 的发送/接收由 DPDK **EAL** 管理的 **lcore** 上运行的 **tasklet*
 
 **Tasklet**：MTL 内部用 **scheduler（sch）** 管理 tasklet（视频 TX/RX、转换等），每个 sch 绑定到若干 lcore。增加 `--tasklets` 可提高并发度；过多可能增加调度开销，可按实际负载调节。更多细节见 [MTL Run Guide](https://openvisualcloud.github.io/Media-Transport-Library/doc/run.html)。
 
+**跑满 2.5G（如 I226-V）**：单路 1080p59.94 4:2:2 10-bit 约 2.1～2.3 Gbps，已接近 2.5G 链路。瓶颈多为 **单核 TX**（MTL 单会话单 sch 单 lcore），易出现 build timeout 和 put_video 失败。st2110_send 已支持 **背压重试** 与 **预填帧**，可尽量发完、提高实际占用：
+
+- `--put-retry <n>`：put_video 失败时重试次数（默认 150），每次间隔 2ms，用背压等管道排空后再发。
+- `--prefill-frames <n>`：启动时先无节奏推送 n 帧填满 TX 环（默认 4，仅在使用 `--url` 时生效），减轻前期 build timeout。
+
+示例（尽量跑满 2.5G、少丢帧）：
+```bash
+./st2110_send --url yuv420p10le_1080p.yuv --width 1920 --height 1080 \
+  --duration 30 --audio-port 0 --ip 239.0.0.1 --video-port 5004 \
+  --port 0000:04:00.0 --sip 192.168.10.1 --no-ptp \
+  --lcores 0-3 --tasklets 16 --put-retry 200 --prefill-frames 8
+```
+若仍不稳，可配置 1G 大页（§2.3）并做 CPU 隔离（如将 sch 所在 lcore 与系统隔离），或适当降低分辨率/帧率以减轻单核负载。
+
 ### 2.7 多 MTL 进程时运行 MtlManager
 
 若 **同一台机器** 上会运行多个 MTL 应用进程，需先在该机启动 MTL 的 Manager：
@@ -248,7 +262,7 @@ cd /path/to/GPT_mtl_encode_sdk/build
 ## 四、故障排查
 
 - **mtl_init 失败**：检查大页是否足够（§2.3，可试 4096 或 1G 大页）、是否已绑定 vfio、当前用户是否在 `vfio` 组、是否有 RLIMIT_MEMLOCK 限制。
-- **build timeout / put_video 失败**：多为发送队列积压，可增大大页（§2.3）、或为 MTL 指定更多/固定 lcore（§2.6，若所用 MTL 支持）。
+- **build timeout / put_video 失败**：多为发送队列积压。可：增大大页（§2.3）、为 MTL 指定 lcore/tasklet（§2.6）、使用 `--put-retry` 与 `--prefill-frames`（背压重试与预填帧，见 §2.6「跑满 2.5G」）。
 - **收不到包**：确认两机 `--ip`/`--video-port` 一致、`--sip` 为直连网口 IP、`--port` 为实际用于直连的 BDF；防火墙/组播路由在直连场景一般不需改。
 - **网卡绑定后无法 ping**：正常，DPDK 占用后内核不再使用该网卡；若需同时用该网卡 ping，请改用 Kernel 模式（`--port kernel:接口名`）。
 

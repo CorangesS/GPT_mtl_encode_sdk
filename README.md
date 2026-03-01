@@ -170,6 +170,7 @@ cd /path/to/GPT_mtl_encode_sdk/build
 | `--width` `--height` `--fps` | 分辨率/帧率 | 须一致 |
 | `--url` | YUV 文件路径 | - |
 | `--no-ptp` | 禁用 PTP，使用人工计算时间戳（网卡不支持 PTP 时回退） | 收发一致 |
+| `--put-retry` `--prefill-frames` | 发送端：put_video 失败重试次数、启动预填帧数，利于跑满 2.5G、缓解 build timeout | 见 [DPDK_MTL_SETUP §2.6](docs/DPDK_MTL_SETUP.md#26-cpulcore-与-tasklet-配置跑满-25g如-i226-v) |
 
 ---
 

@@ -30,7 +30,9 @@ static void usage(const char* prog) {
             << "  --lcores <list>          DPDK lcores for MTL, e.g. 0-3 or 2,3,4,5 (faster TX)\n"
             << "  --main-lcore <id>         Main lcore id (default: MTL auto)\n"
             << "  --tasklets <n>           Tasklets per lcore; 0=auto (try 16 if build timeout)\n"
-            << "  --data-quota-mbs <n>     Max data quota MB/s per lcore; 0=auto\n";
+            << "  --data-quota-mbs <n>     Max data quota MB/s per lcore; 0=auto\n"
+            << "  --put-retry <n>          Retries when put_video fails (backpressure); 0=no retry (default: 150)\n"
+            << "  --prefill-frames <n>     Frames to push at start without pacing to fill TX ring (default: 4 with --url, 0 otherwise)\n";
 }
 
 // Convert yuv420p10le (3 planes) to yuv422p10le (3 planes).
@@ -72,6 +74,8 @@ int main(int argc, char** argv) {
   int main_lcore = -1;
   uint32_t tasklets_nb_per_sch = 0;
   uint32_t data_quota_mbs_per_sch = 0;
+  int put_retry = 150;       // default: backpressure when put_video fails
+  int prefill_frames = -1;  // -1 = auto: 4 when from file, 0 otherwise
 
   for (int i = 1; i < argc; i++) {
     std::string a = argv[i];
@@ -92,8 +96,11 @@ int main(int argc, char** argv) {
     if (a == "--main-lcore" && i + 1 < argc) { main_lcore = atoi(argv[++i]); continue; }
     if (a == "--tasklets" && i + 1 < argc) { tasklets_nb_per_sch = (uint32_t)atoi(argv[++i]); continue; }
     if (a == "--data-quota-mbs" && i + 1 < argc) { data_quota_mbs_per_sch = (uint32_t)atoi(argv[++i]); continue; }
+    if (a == "--put-retry" && i + 1 < argc) { put_retry = atoi(argv[++i]); continue; }
+    if (a == "--prefill-frames" && i + 1 < argc) { prefill_frames = atoi(argv[++i]); continue; }
     if (a == "--help" || a == "-h") { usage(argv[0]); return 0; }
   }
+  if (prefill_frames < 0) prefill_frames = (!url.empty()) ? 4 : 0;
 
   mtl_sdk::MtlSdkConfig cfg;
   cfg.ports.push_back({port_name, sip});
@@ -225,21 +232,53 @@ int main(int argc, char** argv) {
   if (!use_ptp) {
     std::cout << "PTP disabled, using synthetic timestamps\n";
   }
+  // One-time PTP check so prefill and main loop can use correct timestamp source
+  if (ptp_valid) {
+    int64_t ptp_ns = ctx->now_ptp_ns();
+    if (ptp_ns == 0) {
+      ptp_valid = false;
+      std::cout << "PTP unavailable (NIC/mode may not support it), falling back to synthetic timestamps\n";
+    }
+  }
 
-  for (int i = 0; i < total_video_frames; i++) {
-    if (ptp_valid) {
-      int64_t ptp_ns = ctx->now_ptp_ns();
-      if (i == 0 && ptp_ns == 0) {
-        ptp_valid = false;
-        std::cout << "PTP unavailable (NIC/mode may not support it), falling back to synthetic timestamps\n";
+  // Prefill: push first prefill_frames without pacing to fill TX ring (reduces early build timeout)
+  const int prefill = std::min(prefill_frames, total_video_frames);
+  for (int i = 0; i < prefill; i++) {
+    frame.timestamp_ns = ptp_valid ? ctx->now_ptp_ns() : (int64_t)i * frame_ns;
+    if (from_file) {
+      if (use_yuv420) {
+        const size_t y_read = y_sz;
+        const size_t u420_sz = (size_t)(width / 2) * (height / 2) * 2;
+        const size_t v420_sz = u420_sz;
+        std::vector<uint8_t> u420(u420_sz), v420(v420_sz);
+        yuv_file.read((char*)y_buf.data(), y_read);
+        yuv_file.read((char*)u420.data(), u420_sz);
+        yuv_file.read((char*)v420.data(), v420_sz);
+        if (!yuv_file || (size_t)yuv_file.gcount() < v420_sz) break;
+        yuv420p10le_to_yuv422p10le(width, height,
+            y_buf.data(), u420.data(), v420.data(),
+            y_buf.data(), u_buf.data(), v_buf.data());
+      } else {
+        yuv_file.read((char*)y_buf.data(), y_sz);
+        yuv_file.read((char*)u_buf.data(), uv_sz);
+        yuv_file.read((char*)v_buf.data(), uv_sz);
+        if (!yuv_file) break;
       }
-      if (ptp_valid) {
-        frame.timestamp_ns = ptp_ns;
-      }
+    } else {
+      for (size_t j = 0; j < y_sz; j += 2)
+        *(uint16_t*)(y_buf.data() + j) = (uint16_t)(((j/2 + i) % 1024) << 6);
+      std::fill(u_buf.begin(), u_buf.end(), 0);
+      std::fill(v_buf.begin(), v_buf.end(), 0);
     }
-    if (!ptp_valid) {
-      frame.timestamp_ns = (int64_t)i * frame_ns;
-    }
+    if (!v_tx->put_video(frame)) break;
+  }
+  if (prefill > 0) {
+    std::cout << "Prefilled " << prefill << " frame(s) into TX ring\n";
+  }
+
+  int last_put_frame = -1;
+  for (int i = prefill; i < total_video_frames; i++) {
+    frame.timestamp_ns = ptp_valid ? ctx->now_ptp_ns() : (int64_t)i * frame_ns;
 
     if (from_file) {
       if (use_yuv420) {
@@ -268,10 +307,20 @@ int main(int argc, char** argv) {
       std::fill(v_buf.begin(), v_buf.end(), 0);
     }
 
-    if (!v_tx->put_video(frame)) {
-      std::cerr << "put_video failed at frame " << i << "\n";
+    bool put_ok = false;
+    if (put_retry > 0) {
+      for (int r = 0; r < put_retry; r++) {
+        if (v_tx->put_video(frame)) { put_ok = true; break; }
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+      }
+    } else {
+      put_ok = v_tx->put_video(frame);
+    }
+    if (!put_ok) {
+      std::cerr << "put_video failed at frame " << i << " (after " << put_retry << " retries)\n";
       break;
     }
+    last_put_frame = i;
 
     if (a_tx && audio_chunks_sent < audio_chunks_total) {
       int chunks_this_frame = (int)((i + 1) * samples_per_audio_chunk * 2 / 48000.0) - audio_chunks_sent;
@@ -295,7 +344,8 @@ int main(int argc, char** argv) {
   }
 
   ctx->stop();
-  std::cout << "Sent " << total_video_frames << " video frames to " << ip << ":" << video_port;
+  int frames_sent = (last_put_frame >= 0) ? (last_put_frame + 1) : prefill;
+  std::cout << "Sent " << frames_sent << " video frames to " << ip << ":" << video_port;
   if (a_tx) std::cout << ", " << audio_chunks_sent << " audio chunks to " << ip << ":" << audio_port;
   std::cout << "\n";
   return 0;
