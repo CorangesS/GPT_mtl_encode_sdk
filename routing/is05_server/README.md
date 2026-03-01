@@ -9,8 +9,8 @@
 
 ## 前置
 
-1. 使用 `routing/scripts/register_node_example.py` 向 Registry 注册节点时，加上 `--save-config` 将 node/receiver 信息写入 `.nmos_node.json`，IS-05 服务会读取其中的 `receiver_id`。
-2. 或通过环境变量 `IS05_RECEIVER_ID` 指定 receiver ID（须与 IS-04 注册的 id 一致）。
+- **Receiver 端**：注册时使用 `--mode receiver --save-config .nmos_node.json`，IS-05 服务读取 `.nmos_node.json` 中的 `receiver_id`；或设置环境变量 `IS05_RECEIVER_ID`。
+- **Sender 端**：注册时使用 `--mode sender --save-config .nmos_node.json`，IS-05 服务读取 `.nmos_node.json` 中的 `sender_id`；或设置环境变量 `IS05_SENDER_ID`。同一 app 可同时支持 receiver 与 sender（配置中同时有 receiver_id 与 sender_id 时两端都会暴露）。
 
 ## 运行
 
@@ -32,14 +32,19 @@ Controller 访问 `http://<本机IP>/admin`，对自研 Receiver 执行「连接
 
 ## API 端点（IS-05 v1.1 single）
 
+- **GET /x-nmos/connection/v1.1/single/**：返回 `["senders/", "receivers/"]`，便于 Controller 发现 STAGED/ACTIVE/TRANSPORT FILE。
+- **Receivers**：GET/PATCH staged、GET active、constraints、transporttype（见下表）。
+- **Senders**：GET/PATCH staged、GET active、GET transportfile（SDP）、constraints、transporttype。
+
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | /x-nmos/connection/v1.1/single/receivers | 返回 receiver 列表 |
-| GET | /x-nmos/connection/v1.1/single/receivers/{id}/staged | 待生效参数 |
-| PATCH | /x-nmos/connection/v1.1/single/receivers/{id}/staged | 下发并可选立即激活 |
-| GET | /x-nmos/connection/v1.1/single/receivers/{id}/active | 已生效参数 |
-| GET | /x-nmos/connection/v1.1/single/receivers/{id}/constraints | 约束（空数组） |
-| GET | /x-nmos/connection/v1.1/single/receivers/{id}/transporttype | 传输类型 URN |
+| GET | .../single/receivers | 返回 receiver 列表 |
+| GET/PATCH | .../single/receivers/{id}/staged | 待生效参数（STAGED） |
+| GET | .../single/receivers/{id}/active | 已生效参数（ACTIVE） |
+| GET | .../single/senders | 返回 sender 列表 |
+| GET/PATCH | .../single/senders/{id}/staged | Sender 待生效（STAGED） |
+| GET | .../single/senders/{id}/active | Sender 已生效（ACTIVE） |
+| GET | .../single/senders/{id}/transportfile | SDP 传输文件（TRANSPORT FILE） |
 
 ## 依赖
 

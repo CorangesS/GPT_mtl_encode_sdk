@@ -132,6 +132,8 @@ def make_resources(node_href, node_hostname, mode="receiver"):
             {"name": "eth0", "chassis_id": "00-00-00-00-00-00", "port_id": "00-00-00-00-00-01"}
         ],
     }
+    # Controller 通过 Device.controls 发现 IS-05 Connection API，才能显示 ACTIVE/CONNECT/TRANSPORT FILE
+    connection_href = (node_href.rstrip("/") + "/x-nmos/connection/v1.1/")
     device = {
         "id": device_id,
         "version": v,
@@ -142,7 +144,9 @@ def make_resources(node_href, node_hostname, mode="receiver"):
         "receivers": [receiver_id] if receiver_id else [],
         "senders": [sender_id] if sender_id else [],
         "type": "urn:x-nmos:device:generic",
-        "controls": [],
+        "controls": [
+            {"href": connection_href, "type": "urn:x-nmos:control:sr-ctrl/v1.1"},
+        ],
     }
     receiver = None
     if receiver_id:
@@ -280,7 +284,7 @@ def main():
         "--interval",
         type=int,
         default=10,
-        help="Heartbeat interval in seconds (default: 10)",
+        help="Heartbeat interval in seconds (default: 10). Use <= 10 so re-registration happens before Registry TTL expiry (~12s), otherwise nodes will disappear and reappear.",
     )
     parser.add_argument(
         "--mode",
@@ -347,6 +351,8 @@ def main():
         print("Saved config to:", args.save_config)
     if rid:
         print("To make connections drive MTL SDK, run IS-05 server: python3 routing/is05_server/app.py")
+    if sid and args.save_config:
+        print("For Sender STAGED/ACTIVE/TRANSPORT FILE in admin, run IS-05 on this machine: python3 routing/is05_server/app.py (uses .nmos_node.json sender_id)")
 
     if not args.heartbeat:
         return
