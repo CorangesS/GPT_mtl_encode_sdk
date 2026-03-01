@@ -77,21 +77,47 @@ cmake --build . -j
 | **st2110_send** | 发送 ST2110 组播 |
 | **st2110_record** | 接收组播并编码为 MP4 |
 
-**本机测试**（先启动接收端再启动发送端）：
+**本机回环测试**（先启动接收端再启动发送端，使用回环口 `kernel:lo`）：
 ```bash
-# 终端 1
-./st2110_record --ip 239.0.0.1 --video-port 5004 --audio-port 0 --max-frames 600 recv.mp4
+# 终端 1（接收端）
+./st2110_record --ip 239.0.0.1 --video-port 5004 --audio-port 0 --max-frames 600 recv.mp4 --port kernel:lo
 
-# 终端 2
-./st2110_send --ip 239.0.0.1 --video-port 5004 --audio-port 0 --duration 10
+# 终端 2（发送端）
+./st2110_send --ip 239.0.0.1 --video-port 5004 --audio-port 0 --duration 10 --port kernel:lo
 ```
 
-**从 YUV 文件发送：**
+从 YUV 文件做本机回环发送时，发送端可用：
 ```bash
-./st2110_send --url /path/to/yuv420p10le_1080p.yuv --width 1920 --height 1080 --duration 30 --audio-port 0
-````
+./st2110_send --url build/yuv420p10le_1080p.yuv --width 1920 --height 1080 --duration 30 --audio-port 0 --ip 239.0.0.1 --video-port 5004 --port kernel:lo
+```
 
-**双机（Kernel 模式）**：A 机 `st2110_send`，B 机 `st2110_record`，组播地址与端口一致，网络组播可达。详见 [docs/TESTING.md](docs/TESTING.md)。
+**双机收发测试（Kernel 模式）**：双机收发需先**配置网络**（发送端、接收端网卡与 IP 一致），再在两机分别运行发送端与接收端。
+
+- **发送端网卡**：`enp4s0`，IP `192.168.10.1`
+- **接收端网卡**：`enp6s0`，IP `192.168.10.2`
+- **发送文件**：`build/yuv420p10le_1080p.yuv`（1920×1080）
+
+网络配置（任选其一）：
+- **临时**：发送端执行 `sudo ip addr add 192.168.10.1/24 dev enp4s0`；接收端执行 `sudo ip addr add 192.168.10.2/24 dev enp6s0`
+- **固定**：见 [docs/netplan/README.md](docs/netplan/README.md)，发送端用 `99-st2110-sender-enp4s0.yaml`，接收端用 `99-st2110-receiver-enp6s0.yaml`，然后 `sudo netplan apply`
+
+**接收端（B 机，先启动）：**
+```bash
+cd build
+./st2110_record --ip 239.0.0.1 --video-port 5004 --audio-port 0 \
+  --width 1920 --height 1080 --max-frames 1800 recv.mp4 \
+  --port kernel:enp6s0 --sip 192.168.10.2 --no-ptp
+```
+
+**发送端（A 机，后启动）：**
+```bash
+cd build
+./st2110_send --url build/yuv420p10le_1080p.yuv --width 1920 --height 1080 \
+  --duration 30 --audio-port 0 --ip 239.0.0.1 --video-port 5004 \
+  --port kernel:enp4s0 --sip 192.168.10.1 --no-ptp
+```
+
+> 若在 `build` 目录下执行，发送端可用 `--url yuv420p10le_1080p.yuv`。更多双机说明见 [docs/TESTING.md](docs/TESTING.md)。
 
 #### 双机收发（DPDK 模式，高性能）
 
