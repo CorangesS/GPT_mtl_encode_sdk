@@ -15,6 +15,8 @@
 
 若你已能 ping 通，可先用 **Kernel 模式** 验证收发（见 [TESTING.md 2.1](TESTING.md#21-使用-kernel-模式两机已能-ping-通时)）。需要更高性能或必须走 DPDK 时，再按本文做 DPDK/MTL 配置。
 
+**常见网卡**：**Intel I226-V**（及 I225 等 IGC 系）在 DPDK 中由 IGC PMD 支持，可按本文用 **vfio-pci 绑定** 使用 DPDK 模式；Intel E810/E830 等 E800 系列则常用 MTL 的 SR-IOV 脚本。绑定步骤见下文 §2.4。
+
 ---
 
 ## 二、DPDK/MTL 配置（两台机器均需执行）
@@ -80,13 +82,32 @@ sudo sysctl -w vm.nr_hugepages=2048
 
 直连用的 **同一块网卡** 需绑定到 `vfio-pci`，内核将不再使用该网卡（无法 ping 等），故用 **专门用于 MTL 直连的那块网卡**。
 
+0. **加载 vfio-pci 模块**（绑定前必须先执行，否则会报 `Driver 'vfio-pci' is not loaded`）：
+   ```bash
+   sudo modprobe vfio-pci
+   ```
+   若需 IOMMU 支持，可先加载：`sudo modprobe vfio`、`sudo modprobe vfio_iommu_type1`。用 `lsmod | grep vfio` 确认已加载。
+
 1. **查看网卡与 BDF**：
    ```bash
    lshw -c network -businfo
    ```
-   记下直连网卡对应的 **BDF**（如 `0000:af:01.0`）。
+   记下直连网卡对应的 **BDF**（如 `0000:04:00.0`）。也可用 `ip link` 看接口名后，用 `ethtool -i enp4s0` 查看对应 PCI 地址。
 
-2. **绑定**（二选一）：
+2. **先将网卡 down**（否则会报 `routing table indicates that interface is active. Not modifying`）：
+   ```bash
+   # 把 enp4s0 换成你直连网卡的实际接口名（与 BDF 对应）
+   sudo ip link set enp4s0 down
+   ```
+   若不确定 BDF 对应的接口名：`ls /sys/bus/pci/devices/0000:04:00.0/net/` 会列出该 PCI 设备对应的内核网卡名。
+
+3. **绑定**（按网卡类型选一种）：
+   - **Intel I225 / I226-V（IGC）**：DPDK 通过 IGC PMD 支持，使用 **vfio-pci 绑定**（无需 SR-IOV/VF）。在 DPDK 源码目录下执行（MTL 依赖的 DPDK 通常位于 MTL 的 submodule 或 `$MTL_ROOT` 同级的 `dpdk`）：
+     ```bash
+     # 假设 BDF 为 0000:04:00.0（请换成 lshw 看到的实际 BDF）
+     sudo $MTL_ROOT/dpdk/usertools/dpdk-devbind.py --bind=vfio-pci 0000:04:00.0
+     ```
+     若 DPDK 在系统路径，也可：`sudo dpdk-devbind.py --bind=vfio-pci 0000:04:00.0`。绑定后 `--port` 即用该 BDF（如 `0000:04:00.0`）。
    - **Intel E800 系列（E810/E830）**：若 MTL 提供脚本（如 `script/nicctl.sh`），在 MTL 源码目录下：
      ```bash
      cd $MTL_SOURCE   # 或 /path/to/Media-Transport-Library
@@ -95,7 +116,7 @@ sudo sysctl -w vm.nr_hugepages=2048
      脚本会创建 VF 并绑定，输出中会给出 VF 的 BDF（如 `0000:af:01.0`），本程序 `--port` 用该 BDF。
    - **其他 DPDK 支持的网卡**：使用 MTL 或 DPDK 的绑定脚本（如 `nicctl.sh bind_pmd 0000:32:00.0`），或 DPDK 的 `dpdk-devbind.py --bind=vfio-pci <BDF>`。
 
-3. **确认**：
+4. **确认**：
    ```bash
    ls -l /dev/vfio/
    ```
@@ -139,7 +160,7 @@ sudo MtlManager
 cd /path/to/GPT_mtl_encode_sdk/build
 ./st2110_record --ip 239.0.0.1 --video-port 5004 --audio-port 0 \
   --width 1920 --height 1080 --max-frames 1800 recv.mp4 \
-  --port 0000:af:01.0 --sip 192.168.10.2 --no-ptp
+  --port 0000:06:00.0 --sip 192.168.10.2 --no-ptp
 ```
 
 **发送端（A 机）后启动：**
@@ -149,7 +170,7 @@ cd /path/to/GPT_mtl_encode_sdk/build
 # 若当前目录为 build，YUV 在 build 下则用 --url yuv420p10le_1080p.yuv
 ./st2110_send --url yuv420p10le_1080p.yuv --width 1920 --height 1080 \
   --duration 30 --audio-port 0 --ip 239.0.0.1 --video-port 5004 \
-  --port 0000:af:01.0 --sip 192.168.10.1 --no-ptp
+  --port 0000:04:00.0 --sip 192.168.10.1 --no-ptp
 ```
 
 若在项目根目录执行，则发送端用 `--url build/yuv420p10le_1080p.yuv`。两机 `--ip`、`--video-port`、`--audio-port`、分辨率、帧率需一致；`--port` 为各自直连网卡的 BDF，`--sip` 为各自直连网口 IP。
