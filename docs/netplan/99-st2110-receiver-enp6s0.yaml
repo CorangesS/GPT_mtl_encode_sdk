@@ -1,8 +1,0 @@
-# 接收端固定 IP：enp6s0 = 192.168.10.2
-# 用法：在接收端机器上 sudo cp 此文件到 /etc/netplan/ 后执行 sudo netplan apply
-# 例如：sudo cp docs/netplan/99-st2110-receiver-enp6s0.yaml /etc/netplan/
-network:
-  version: 2
-  ethernets:
-    enp6s0:
-      addresses: [192.168.10.2/24]

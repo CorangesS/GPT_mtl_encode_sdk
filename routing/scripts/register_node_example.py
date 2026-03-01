@@ -29,7 +29,12 @@ try:
 
     def post(url, data):
         r = requests.post(url, json=data, timeout=5)
-        r.raise_for_status()
+        if not r.ok:
+            try:
+                err_body = r.text
+            except Exception:
+                err_body = ""
+            raise RuntimeError(f"HTTP {r.status_code} for {url}: {err_body}")
         return r.json() if r.content else None
 
     def get_json(url):
@@ -168,6 +173,9 @@ def make_resources(node_href, node_hostname, mode="receiver"):
             "device_id": device_id,
             "format": "urn:x-nmos:format:video",
             "grain_rate": {"numerator": 60000, "denominator": 1001},
+            "caps": {},
+            "parents": [],
+            "clock_name": "clk0",
         }
         flow = {
             "id": flow_id,
@@ -184,6 +192,11 @@ def make_resources(node_href, node_hostname, mode="receiver"):
             "frame_height": 1080,
             "colorspace": "BT709",
             "media_type": "video/raw",
+            "components": [
+                {"name": "Y", "width": 1920, "height": 1080, "bit_depth": 10},
+                {"name": "Cb", "width": 960, "height": 1080, "bit_depth": 10},
+                {"name": "Cr", "width": 960, "height": 1080, "bit_depth": 10},
+            ],
         }
         sender = {
             "id": sender_id,
@@ -308,6 +321,7 @@ def main():
         register_once(reg_base, node, device, receiver, source, flow, sender)
     except Exception as e:
         print("Failed to register:", e, file=sys.stderr)
+        print("Tip: set REGISTRY_URL to your Easy-NMOS IP (e.g. export REGISTRY_URL=http://192.168.1.100)", file=sys.stderr)
         sys.exit(1)
 
     print("Done. Node:", nid, end="")
