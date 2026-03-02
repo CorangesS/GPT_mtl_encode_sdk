@@ -198,35 +198,63 @@ cd /path/to/GPT_mtl_encode_sdk/build
 
 ## 八、路由管理快速开始（Easy-NMOS）
 
-若已部署 Easy-NMOS，快速接入自研节点：
+### 角色约定
 
-```bash
+| 机器 | IP | 角色 |
+|------|-----|------|
+| **本机** | 192.168.1.200 | 仅运行 Easy-NMOS（Registry + Controller） |
+| **第二台电脑** | 192.168.1.110 | 运行自研 Sender 与 Receiver 节点 |
 
-# 1. 创建 macvlan 子接口（使用 bridge 模式）
-sudo ip link add link eno1 macvlan0-host type macvlan mode bridge
+第二台电脑上 Sender 与 Receiver 属于**同一 Node**，只需**一个 IS-05 服务**（单端口），无需两个不同端口的 IS-05。
 
-# 2. 启动接口
-sudo ip link set dev macvlan0-host up
+### 本机（192.168.1.200）
 
-# 3. 为子接口分配一个 IP（与容器同网段，但不要冲突）
-sudo ip addr add 192.168.1.50/24 dev macvlan0-host
+仅需启动并保持 Easy-NMOS 运行，确保 Controller 可访问：
 
-# 4. 添加路由，指向容器 IP 通过 macvlan0-host 接口
-sudo ip route add 192.168.1.200/32 dev macvlan0-host
-sudo ip route add 192.168.1.201/32 dev macvlan0-host
-sudo ip route add 192.168.1.203/32 dev macvlan0-host
-
-# 5. 开启网卡混杂模式
-sudo ip link set eno1 promisc on
-
-
-export REGISTRY_URL=http://<Easy-NMOS-IP>   # 如 http://192.168.6.101
-python3 routing/scripts/register_node_example.py --heartbeat --interval 10 --save-config .nmos_node.json &
-python3 routing/is05_server/app.py &        # IS-05 服务（可选，使 Controller 连接能驱动收流）
-./build/is05_receiver_daemon &               # 或 ./build/st2110_record ... 收流编码
+```
+http://192.168.1.200/admin
 ```
 
-或仅注册 + 手动收流：`routing/scripts/run_with_nmos.sh`。IS-05 服务端与 daemon 说明见 [routing/is05_server/README.md](routing/is05_server/README.md)。详见 [docs/需求3_路由管理部署与使用.md](docs/需求3_路由管理部署与使用.md)。
+### 第二台电脑（192.168.1.110）
+
+在多个终端中依次执行：
+
+**终端 1：注册节点（收发一体，心跳保活）**
+```bash
+cd /path/to/GPT_mtl_encode_sdk
+export REGISTRY_URL=http://192.168.1.200
+
+python3 routing/scripts/register_node_example.py --mode both \
+  --heartbeat --interval 10 \
+  --href http://192.168.1.110:9090/ \
+  --save-config .nmos_node.json
+```
+
+**终端 2：IS-05 服务（单端口同时服务 Sender 与 Receiver）**
+```bash
+cd /path/to/GPT_mtl_encode_sdk
+export REGISTRY_URL=http://192.168.1.200
+export CONNECTION_STATE_FILE=./connection_state.json
+
+python3 routing/is05_server/app.py
+```
+
+**终端 3：收流 daemon（在 Controller 中 CONNECT 后驱动 MTL 收流并编码）**
+```bash
+cd /path/to/GPT_mtl_encode_sdk/build
+
+./is05_receiver_daemon
+```
+
+### 使用流程
+
+1. 在任意电脑浏览器打开 `http://192.168.1.200/admin`
+2. 在 Nodes / Receivers / Senders 中应看到 192.168.1.110 注册的节点
+3. 选一个 Receiver，点 **CONNECT**，选择要连接的 Sender，确认激活
+4. 第二台电脑上的 `is05_receiver_daemon` 会按连接参数收流并写 MP4
+
+> 若 Easy-NMOS 运行在 Docker 中，第二台电脑需能访问 192.168.1.200；网络不通时可参考 [docs/需求3_路由管理部署与使用.md](docs/需求3_路由管理部署与使用.md) 中的 macvlan 等配置。  
+> IS-05 服务端与 daemon 说明见 [routing/is05_server/README.md](routing/is05_server/README.md)。
 
 ## 九、测试
 

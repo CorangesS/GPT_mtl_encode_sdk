@@ -1,5 +1,5 @@
 // IS-05 receiver daemon: polls connection_state.json (written by routing/is05_server),
-// creates/updates MTL video_rx and encodes to MP4. Run alongside the Python IS-05 server.
+// creates/updates MTL video_rx/audio_rx and encodes to MP4（含可选音频轨）.
 
 #include "mtl_sdk/mtl_sdk.hpp"
 #include "encode_sdk/encode_sdk.hpp"
@@ -70,6 +70,22 @@ static std::string video_block(const std::string& json) {
   return json.substr(start, pos - start);
 }
 
+// Find "audio": { ... } sub-object
+static std::string audio_block(const std::string& json) {
+  auto pos = json.find("\"audio\"");
+  if (pos == std::string::npos) return std::string();
+  pos = json.find('{', pos);
+  if (pos == std::string::npos) return std::string();
+  int depth = 1;
+  size_t start = pos++;
+  while (pos < json.size() && depth > 0) {
+    if (json[pos] == '{') depth++;
+    else if (json[pos] == '}') depth--;
+    pos++;
+  }
+  return json.substr(start, pos - start);
+}
+
 struct ConnectionState {
   bool master_enable = false;
   std::string video_ip;
@@ -78,6 +94,12 @@ struct ConnectionState {
   int width = 1920;
   int height = 1080;
   double fps = 59.94;
+  std::string audio_ip;
+  uint16_t audio_port = 0;
+  uint8_t audio_pt = 97;
+  int audio_sample_rate = 48000;
+  int audio_channels = 2;
+  bool has_audio = false;
   bool valid = false;
 };
 
@@ -99,6 +121,18 @@ static ConnectionState read_connection_state(const std::string& path) {
   s.width = extract_int(vb, "width", 1920);
   s.height = extract_int(vb, "height", 1080);
   s.fps = extract_double(vb, "fps", 59.94);
+  // optional audio block
+  std::string ab = audio_block(json);
+  if (!ab.empty()) {
+    s.audio_ip = extract_string(ab, "ip");
+    if (!s.audio_ip.empty()) {
+      s.audio_port = (uint16_t)extract_int(ab, "udp_port", 0);
+      s.audio_pt = (uint8_t)extract_int(ab, "payload_type", 97);
+      s.audio_sample_rate = extract_int(ab, "sample_rate", 48000);
+      s.audio_channels = extract_int(ab, "channels", 2);
+      if (s.audio_port != 0) s.has_audio = true;
+    }
+  }
   s.valid = true;
   return s;
 }
@@ -144,6 +178,7 @@ int main(int argc, char** argv) {
   }
 
   std::unique_ptr<mtl_sdk::Context::VideoRxSession> video_rx;
+  std::unique_ptr<mtl_sdk::Context::AudioRxSession> audio_rx;
   std::unique_ptr<encode_sdk::Session> enc;
   std::mutex session_mutex;
   ConnectionState current_state;
@@ -159,6 +194,7 @@ int main(int argc, char** argv) {
     if (state_changed && state.valid) {
       std::lock_guard<std::mutex> lock(session_mutex);
       video_rx.reset();
+      audio_rx.reset();
       enc.reset();
 
       mtl_sdk::VideoFormat vf;
@@ -183,11 +219,31 @@ int main(int argc, char** argv) {
         ep.video.input_fmt = mtl_sdk::VideoPixFmt::YUV422_10BIT;
         ep.video.fps_num = (int)(state.fps + 0.5);
         ep.video.fps_den = 1;
-        ep.audio = std::nullopt;
+        if (state.has_audio) {
+          mtl_sdk::AudioFormat af;
+          af.sample_rate = state.audio_sample_rate;
+          af.channels = state.audio_channels;
+          af.bits_per_sample = 16;
+          mtl_sdk::St2110Endpoint aep{state.audio_ip, state.audio_port, state.audio_pt};
+          audio_rx = ctx->create_audio_rx(af, aep);
+          if (audio_rx) {
+            ep.audio = encode_sdk::AudioEncodeParams{};
+            ep.audio->codec = encode_sdk::AudioCodec::AAC;
+            ep.audio->bitrate_kbps = 128;
+            ep.audio->sample_rate = state.audio_sample_rate;
+            ep.audio->channels = state.audio_channels;
+          } else {
+            std::cerr << "create_audio_rx failed for " << state.audio_ip << ":" << state.audio_port << "\n";
+            ep.audio = std::nullopt;
+          }
+        } else {
+          ep.audio = std::nullopt;
+        }
         enc = encode_sdk::Session::open(ep);
         if (!enc) {
           std::cerr << "Encoder open failed\n";
           video_rx.reset();
+          audio_rx.reset();
         } else {
           current_state = state;
           max_frames = run_frames;
@@ -198,6 +254,7 @@ int main(int argc, char** argv) {
     } else if (state_changed && !state.valid) {
       std::lock_guard<std::mutex> lock(session_mutex);
       video_rx.reset();
+      audio_rx.reset();
       if (enc) { enc->close(); enc.reset(); }
       current_state.valid = false;
     }
@@ -213,6 +270,13 @@ int main(int argc, char** argv) {
           enc.reset();
           std::cout << "Wrote " << out_path << "\n";
         }
+      }
+    }
+
+    if (audio_rx && enc) {
+      mtl_sdk::AudioFrame af;
+      if (audio_rx->poll(af, 0)) {
+        enc->push_audio(af);
       }
     }
 

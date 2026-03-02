@@ -10,6 +10,8 @@ import os
 import re
 import sys
 import time
+import threading
+from datetime import datetime, timezone
 
 try:
     from flask import Flask, request, jsonify, Response
@@ -46,6 +48,8 @@ _staged = {}
 _active = {}
 _sender_staged = {}
 _sender_active = {}
+_scheduled_receiver_activations = {}  # receiver_id -> activation_time_ns
+_scheduled_sender_activations = {}    # sender_id -> activation_time_ns
 
 
 def _load_receiver_id():
@@ -231,6 +235,154 @@ def _write_connection_state(receiver_id, master_enable, sender_id, video, audio)
     return path
 
 
+def _video_audio_from_staged(staged):
+    """从 staged 中的 transport_file 解析出 video/audio，用于定时激活写 connection_state。"""
+    tf = staged.get("transport_file")
+    sdp_text = _sdp_text_from_transport_file(tf)
+    if not sdp_text:
+        return None, None
+    v, a = _parse_sdp_media(sdp_text)
+    video = None
+    audio = None
+    if v:
+        video = {
+            "ip": v["endpoint"]["ip"],
+            "udp_port": v["endpoint"]["udp_port"],
+            "payload_type": v["endpoint"].get("payload_type", 96),
+            "width": v.get("width", 1920),
+            "height": v.get("height", 1080),
+            "fps": v.get("fps", 59.94),
+        }
+    if a:
+        audio = {
+            "ip": a["endpoint"]["ip"],
+            "udp_port": a["endpoint"]["udp_port"],
+            "payload_type": a["endpoint"].get("payload_type", 97),
+            "sample_rate": a.get("sample_rate", 48000),
+            "channels": a.get("channels", 2),
+        }
+    return video, audio
+
+
+def _parse_requested_time_to_ns(requested_time):
+    """将 IS-05 activation.requested_time 转为 epoch ns。
+
+    支持：
+    - TAI 风格 \"<seconds>:<nanoseconds>\"
+    - ISO8601（例如 2025-03-03T10:00:00Z）
+    - 其它/无法解析时返回 None（调用方可回退为立即激活）
+    """
+    if not requested_time:
+        return None
+    if not isinstance(requested_time, str):
+        return None
+    s = requested_time.strip()
+    if not s or s.lower() in ("now", "immediate"):
+        return None
+
+    # TAI-like seconds:nanoseconds
+    if ":" in s:
+        parts = s.split(":", 1)
+        if parts[0].isdigit():
+            try:
+                sec = int(parts[0])
+                nano = int(parts[1]) if parts[1].isdigit() else 0
+                return sec * 1_000_000_000 + nano
+            except ValueError:
+                pass
+
+    # ISO8601 (treat as UTC)
+    try:
+        txt = s.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(txt)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        sec = int(dt.timestamp())
+        return sec * 1_000_000_000
+    except Exception:
+        return None
+
+
+def _activation_scheduler():
+    """后台轮询定时激活队列，实现 activate_scheduled。"""
+    while True:
+        now_ns = int(time.time() * 1_000_000_000)
+
+        # Receiver 端定时激活：写 ACTIVE + connection_state，驱动收流
+        for rid, ts in list(_scheduled_receiver_activations.items()):
+            if now_ns >= ts:
+                staged = _staged.get(rid, _default_staged(rid))
+                activation_time = f"{now_ns}:0"
+                tp = staged.get("transport_params")
+                if not tp or (isinstance(tp, list) and len(tp) == 0):
+                    tf = staged.get("transport_file")
+                    if tf:
+                        sdp_text = _sdp_text_from_transport_file(tf)
+                        if sdp_text:
+                            tp = _transport_params_from_sdp(sdp_text)
+                if not tp or (isinstance(tp, list) and len(tp) == 0):
+                    tp = _default_rtp_receiver_transport_params()
+
+                _active[rid] = {
+                    "sender_id": staged.get("sender_id"),
+                    "master_enable": staged.get("master_enable", False),
+                    "activation": {
+                        "mode": "activate_immediate",
+                        "requested_time": staged.get("activation", {}).get("requested_time"),
+                        "activation_time": activation_time,
+                    },
+                    "transport_params": tp,
+                    "transport_file": staged.get("transport_file"),
+                }
+
+                video, audio = _video_audio_from_staged(staged)
+                try:
+                    _write_connection_state(
+                        rid, staged.get("master_enable", False), staged.get("sender_id"), video, audio
+                    )
+                except Exception as e:
+                    print(f"Failed to write scheduled connection state for {rid}: {e}", file=sys.stderr)
+
+                staged.setdefault("activation", {})
+                staged["activation"]["mode"] = "activate_immediate"
+                staged["activation"]["activation_time"] = activation_time
+                _staged[rid] = staged
+                del _scheduled_receiver_activations[rid]
+
+        # Sender 端定时激活：仅更新 ACTIVE/STAGED，未来可扩展驱动真实发流
+        for sid, ts in list(_scheduled_sender_activations.items()):
+            if now_ns >= ts:
+                staged = _sender_staged.get(sid, _default_sender_staged(sid))
+                activation_time = f"{now_ns}:0"
+                tp = staged.get("transport_params")
+                if not tp or (isinstance(tp, list) and len(tp) == 0):
+                    tp = _default_rtp_sender_transport_params()
+                p = tp[0] if tp and isinstance(tp, list) and len(tp) > 0 else {}
+                dest_ip = p.get("destination_ip") or p.get("multicast_ip") or "239.0.0.1"
+                video_port = int(p.get("destination_port", 5004))
+                source_ip = p.get("source_ip", "0.0.0.0")
+                sdp = _make_sdp(sid, source_ip=source_ip, dest_ip=dest_ip, video_port=video_port)
+                transport_file = {"data": sdp, "type": "application/sdp"}
+                _sender_active[sid] = {
+                    "receiver_id": staged.get("receiver_id"),
+                    "master_enable": staged.get("master_enable", False),
+                    "activation": {
+                        "mode": "activate_immediate",
+                        "requested_time": staged.get("activation", {}).get("requested_time"),
+                        "activation_time": activation_time,
+                    },
+                    "transport_params": tp,
+                    "transport_file": transport_file,
+                }
+                staged.setdefault("activation", {})
+                staged["activation"]["mode"] = "activate_immediate"
+                staged["activation"]["activation_time"] = activation_time
+                _sender_staged[sid] = staged
+                del _scheduled_sender_activations[sid]
+
+        time.sleep(0.1)
+
+
 # ---- Node API base (GET /)：Easy-NMOS 等 Controller 会先 GET 节点根，期望 IS-04 nodeapi-base 格式，否则报 "no api found" ----
 # 规范示例 nodeapi-base-get-200：返回 ["self/", "sources/", "flows/", "devices/", "senders/", "receivers/"]
 @app.route("/", methods=["GET"])
@@ -396,6 +548,35 @@ def patch_staged(receiver_id_path):
             print(f"Wrote connection state to {path}", flush=True)
         except Exception as e:
             return jsonify({"error": str(e)}), 500
+    elif mode == "activate_scheduled":
+        # 定时激活：仅记录时间点，由后台调度线程在到时后执行真正激活
+        requested = activation.get("requested_time")
+        ts_ns = _parse_requested_time_to_ns(requested)
+        if ts_ns is None:
+            # 无法解析 requested_time 时，回退为立即激活，避免 Controller 报错
+            activation_time = f"{int(time.time() * 1e9)}:0"
+            video, audio = _parse_patch_body(body)
+            tp = staged.get("transport_params")
+            if not tp or (isinstance(tp, list) and len(tp) == 0):
+                tp = _default_rtp_receiver_transport_params()
+            _active[rid] = {
+                "sender_id": staged["sender_id"],
+                "master_enable": staged["master_enable"],
+                "activation": {"mode": "activate_immediate", "requested_time": requested, "activation_time": activation_time},
+                "transport_params": tp,
+                "transport_file": staged.get("transport_file"),
+            }
+            staged["activation"]["mode"] = "activate_immediate"
+            staged["activation"]["activation_time"] = activation_time
+            try:
+                path = _write_connection_state(
+                    rid, staged["master_enable"], staged.get("sender_id"), video, audio
+                )
+                print(f"Wrote connection state to {path}", flush=True)
+            except Exception as e:
+                return jsonify({"error": str(e)}), 500
+        else:
+            _scheduled_receiver_activations[rid] = ts_ns
 
     return jsonify(staged), 200
 
@@ -569,6 +750,32 @@ def patch_sender_staged(sender_id_path):
         }
         staged["activation"]["mode"] = "activate_immediate"
         staged["activation"]["activation_time"] = activation_time
+    elif mode == "activate_scheduled":
+        requested = activation.get("requested_time")
+        ts_ns = _parse_requested_time_to_ns(requested)
+        if ts_ns is None:
+            # 回退为立即激活，保持行为一致
+            activation_time = f"{int(time.time() * 1e9)}:0"
+            tp = staged.get("transport_params")
+            if not tp or (isinstance(tp, list) and len(tp) == 0):
+                tp = _default_rtp_sender_transport_params()
+            p = tp[0] if tp and isinstance(tp, list) and len(tp) > 0 else {}
+            dest_ip = p.get("destination_ip") or p.get("multicast_ip") or "239.0.0.1"
+            video_port = int(p.get("destination_port", 5004))
+            source_ip = p.get("source_ip", "0.0.0.0")
+            sdp = _make_sdp(sid, source_ip=source_ip, dest_ip=dest_ip, video_port=video_port)
+            transport_file = {"data": sdp, "type": "application/sdp"}
+            _sender_active[sid] = {
+                "receiver_id": staged["receiver_id"],
+                "master_enable": staged["master_enable"],
+                "activation": {"mode": "activate_immediate", "requested_time": requested, "activation_time": activation_time},
+                "transport_params": tp,
+                "transport_file": transport_file,
+            }
+            staged["activation"]["mode"] = "activate_immediate"
+            staged["activation"]["activation_time"] = activation_time
+        else:
+            _scheduled_sender_activations[sid] = ts_ns
 
     return jsonify(staged), 200
 
@@ -632,4 +839,7 @@ if __name__ == "__main__":
         print(f"IS-05 server sender_id={sid}", flush=True)
     if rid:
         print(f"Connection state file: {os.path.abspath(CONNECTION_STATE_FILE)}", flush=True)
+    # 启动定时激活调度线程（支持 activate_scheduled）
+    scheduler = threading.Thread(target=_activation_scheduler, daemon=True)
+    scheduler.start()
     app.run(host=BIND, port=PORT, threaded=True)
