@@ -201,6 +201,25 @@ cd /path/to/GPT_mtl_encode_sdk/build
 若已部署 Easy-NMOS，快速接入自研节点：
 
 ```bash
+
+# 1. 创建 macvlan 子接口（使用 bridge 模式）
+sudo ip link add link eno1 macvlan0-host type macvlan mode bridge
+
+# 2. 启动接口
+sudo ip link set dev macvlan0-host up
+
+# 3. 为子接口分配一个 IP（与容器同网段，但不要冲突）
+sudo ip addr add 192.168.1.50/24 dev macvlan0-host
+
+# 4. 添加路由，指向容器 IP 通过 macvlan0-host 接口
+sudo ip route add 192.168.1.200/32 dev macvlan0-host
+sudo ip route add 192.168.1.201/32 dev macvlan0-host
+sudo ip route add 192.168.1.203/32 dev macvlan0-host
+
+# 5. 开启网卡混杂模式
+sudo ip link set eno1 promisc on
+
+
 export REGISTRY_URL=http://<Easy-NMOS-IP>   # 如 http://192.168.6.101
 python3 routing/scripts/register_node_example.py --heartbeat --interval 10 --save-config .nmos_node.json &
 python3 routing/is05_server/app.py &        # IS-05 服务（可选，使 Controller 连接能驱动收流）

@@ -67,6 +67,20 @@ Controller 访问 `http://<本机IP>/admin`，对自研 Receiver 执行「连接
 - Python 3.6+
 - Flask：`pip install flask`（或 `pip install -r requirements.txt`）
 
+## Sender 的 ACTIVE / STAGED 说明
+
+本服务**已实现** Sender 端的 IS-05 ACTIVE 与 STAGED：
+
+- **GET/PATCH** `.../single/senders/{id}/staged`：查询/更新 Sender 的待生效连接（receiver_id、master_enable、transport_params、activation）。
+- **GET** `.../single/senders/{id}/active`：查询当前已生效连接；激活后返回 transport_params 与 transport_file（由 transport_params 生成的 SDP）。
+- PATCH 时仅更新 body 中出现的字段（receiver_id、master_enable、transport_params 等），未传字段保留原值，避免误清空。
+
+若在 Controller（如 Easy-NMOS）里看不到 Sender 的 ACTIVE/STAGED 入口：
+
+1. 确认节点是以 **Sender** 身份注册：`--mode sender` 或 `--mode both`，且 `--save-config .nmos_node.json`，这样 Registry 与节点上都有 sender_id。
+2. 在该节点机器上运行 `python3 routing/is05_server/app.py`，且能读到 `sender_id`（通过 `.nmos_node.json` 或环境变量 `IS05_SENDER_ID`）。
+3. 确认 Controller 能访问该节点的 `.../x-nmos/connection/v1.1/single/senders` 与 `.../senders/{id}`；GET `.../senders/{id}` 会返回 `["staged/", "active/", "constraints/", "transportfile/", "transporttype/"]`，Controller 据此展示 STAGED、ACTIVE、TRANSPORT FILE 等。
+
 ## 出现 "no api found" 或 Sender/Receiver 无 ACTIVE/TRANSPORT FILE/CONNECT 时
 
 1. **节点根与 Node API**：部分 Controller（如 Easy-NMOS）会先请求节点根 `GET http://<node>:port/`，期望得到 IS-04 Node API base 数组 `["self/", "sources/", "flows/", "devices/", "senders/", "receivers/"]`，并可能继续请求 `/self/`、`/devices/` 等。本服务已实现这些桩路由，返回 200 与最小合法 JSON，避免因 404 导致 "no api found"。请确保 **`--save-config` 写入的 `.nmos_node.json` 含有 `node_id`、`device_id`**（注册脚本已自动写入）。

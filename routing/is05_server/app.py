@@ -538,8 +538,11 @@ def patch_sender_staged(sender_id_path):
     mode = activation.get("mode")
 
     staged = _sender_staged.get(sid, _default_sender_staged(sid))
-    staged["receiver_id"] = body.get("receiver_id")
-    staged["master_enable"] = body.get("master_enable", True)
+    # 仅当 body 中包含该字段时才更新，与 Receiver 端逻辑一致，避免误清空
+    if "receiver_id" in body:
+        staged["receiver_id"] = body.get("receiver_id")
+    if "master_enable" in body:
+        staged["master_enable"] = body.get("master_enable", True)
     staged["activation"] = activation
     if "transport_params" in body:
         staged["transport_params"] = body["transport_params"]
@@ -550,11 +553,19 @@ def patch_sender_staged(sender_id_path):
         tp = staged.get("transport_params")
         if not tp or (isinstance(tp, list) and len(tp) == 0):
             tp = _default_rtp_sender_transport_params()
+        # ACTIVE 中附带 transport_file（由 transport_params 生成），便于 Controller 展示
+        p = tp[0] if tp and isinstance(tp, list) and len(tp) > 0 else {}
+        dest_ip = p.get("destination_ip") or p.get("multicast_ip") or "239.0.0.1"
+        video_port = int(p.get("destination_port", 5004))
+        source_ip = p.get("source_ip", "0.0.0.0")
+        sdp = _make_sdp(sid, source_ip=source_ip, dest_ip=dest_ip, video_port=video_port)
+        transport_file = {"data": sdp, "type": "application/sdp"}
         _sender_active[sid] = {
             "receiver_id": staged["receiver_id"],
             "master_enable": staged["master_enable"],
             "activation": {"mode": "activate_immediate", "requested_time": None, "activation_time": activation_time},
             "transport_params": tp,
+            "transport_file": transport_file,
         }
         staged["activation"]["mode"] = "activate_immediate"
         staged["activation"]["activation_time"] = activation_time
