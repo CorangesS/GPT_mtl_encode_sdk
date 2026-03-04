@@ -1,0 +1,14 @@
+{
+  "receiver_id": "5437d301-9455-4755-a61d-0ac3d9a520ad",
+  "master_enable": true,
+  "sender_id": null,
+  "video": {
+    "ip": "0.0.0.0",
+    "udp_port": 5004,
+    "payload_type": 96,
+    "width": 1920,
+    "height": 1080,
+    "fps": 59.94
+  },
+  "audio": null
+}

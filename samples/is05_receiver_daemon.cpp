@@ -12,6 +12,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <mutex>
+#include <algorithm>
 
 static std::string connection_state_path() {
   const char* p = std::getenv("CONNECTION_STATE_FILE");
@@ -103,6 +104,44 @@ struct ConnectionState {
   bool valid = false;
 };
 
+// ---------------- CLI & codec helpers ----------------
+
+static std::string to_lower(std::string s) {
+  std::transform(s.begin(), s.end(), s.begin(),
+                 [](unsigned char c) { return char(std::tolower(c)); });
+  return s;
+}
+
+static encode_sdk::VideoCodec parse_video_codec(const std::string& s) {
+  std::string v = to_lower(s);
+  if (v == "h265" || v == "hevc") return encode_sdk::VideoCodec::H265;
+  // default: H.264/AVC
+  return encode_sdk::VideoCodec::H264;
+}
+
+static encode_sdk::AudioCodec parse_audio_codec(const std::string& s) {
+  std::string v = to_lower(s);
+  if (v == "aac") return encode_sdk::AudioCodec::AAC;
+  if (v == "mp2") return encode_sdk::AudioCodec::MP2;
+  if (v == "pcm") return encode_sdk::AudioCodec::PCM;
+  if (v == "ac3") return encode_sdk::AudioCodec::AC3;
+  // default: AAC
+  return encode_sdk::AudioCodec::AAC;
+}
+
+static encode_sdk::Container parse_container(const std::string& s) {
+  std::string v = to_lower(s);
+  if (v == "mxf") return encode_sdk::Container::MXF;
+  return encode_sdk::Container::MP4;
+}
+
+static encode_sdk::HwAccel parse_hw(const std::string& s) {
+  std::string v = to_lower(s);
+  if (v == "sw" || v == "software") return encode_sdk::HwAccel::Software;
+  // 默认 Auto：优先 GPU（如 NVENC），失败时回落到软件
+  return encode_sdk::HwAccel::Auto;
+}
+
 static ConnectionState read_connection_state(const std::string& path) {
   ConnectionState s;
   std::ifstream f(path);
@@ -142,6 +181,18 @@ int main(int argc, char** argv) {
   std::string port_name = "kernel:lo";
   std::string sip = "127.0.0.1";
   std::string out_path = "is05_output.mp4";
+  // 编码相关默认值：满足 README/需求.md 的基础要求
+  std::string vcodec_str = "h264";   // H.264 / H.265
+  std::string acodec_str = "aac";    // AAC / MP2 / PCM / AC3
+  std::string container_str = "mp4"; // MP4 / MXF
+  std::string hw_str = "auto";       // auto / sw
+  int vbitrate_kbps = 2000;
+  int abitrate_kbps = 128;
+  int gop = 120;
+  int run_frames = 600;              // 可选：录制多少帧；0 表示持续到断开
+  bool enable_builtin_ptp = false;   // 是否启用 MTL 内建 PTP
+
+  // 解析命令行参数
 
   for (int i = 1; i < argc; i++) {
     std::string a = argv[i];
@@ -149,23 +200,50 @@ int main(int argc, char** argv) {
     if (a == "--sip" && i + 1 < argc) { sip = argv[++i]; continue; }
     if (a == "--output" && i + 1 < argc) { out_path = argv[++i]; continue; }
     if (a == "--state" && i + 1 < argc) { state_path = argv[++i]; continue; }
+    if (a == "--vcodec" && i + 1 < argc) { vcodec_str = argv[++i]; continue; }
+    if (a == "--acodec" && i + 1 < argc) { acodec_str = argv[++i]; continue; }
+    if (a == "--container" && i + 1 < argc) { container_str = argv[++i]; continue; }
+    if (a == "--vbitrate" && i + 1 < argc) { vbitrate_kbps = std::atoi(argv[++i]); continue; }
+    if (a == "--abitrate" && i + 1 < argc) { abitrate_kbps = std::atoi(argv[++i]); continue; }
+    if (a == "--gop" && i + 1 < argc) { gop = std::atoi(argv[++i]); continue; }
+    if (a == "--frames" && i + 1 < argc) { run_frames = std::atoi(argv[++i]); continue; }
+    if (a == "--hw" && i + 1 < argc) { hw_str = argv[++i]; continue; }
+    if (a == "--enable-builtin-ptp") { enable_builtin_ptp = true; continue; }
     if (a == "--help" || a == "-h") {
-      std::cerr << "Usage: is05_receiver_daemon [--port PORT] [--sip SIP] [--output MP4] [--state CONNECTION_STATE_FILE]\n";
+      std::cerr
+          << "Usage: is05_receiver_daemon [--port PORT] [--sip SIP]\n"
+          << "                           [--output FILE] [--state CONNECTION_STATE_FILE]\n"
+          << "                           [--vcodec h264|h265] [--acodec aac|mp2|pcm|ac3]\n"
+          << "                           [--container mp4|mxf]\n"
+          << "                           [--vbitrate KBPS] [--abitrate KBPS]\n"
+          << "                           [--gop FRAMES] [--frames N]\n"
+          << "                           [--hw auto|sw] [--enable-builtin-ptp]\n";
       return 0;
     }
   }
 
   const char* env_port = std::getenv("MTL_PORT");
   const char* env_sip = std::getenv("MTL_SIP");
+  const char* env_ptp = std::getenv("MTL_BUILTIN_PTP");
   if (env_port) port_name = env_port;
   if (env_sip) sip = env_sip;
+  if (env_ptp && std::string(env_ptp) == "1") enable_builtin_ptp = true;
 
-  std::cout << "IS-05 receiver daemon: state_file=" << state_path << " out=" << out_path << "\n";
+  std::cout << "IS-05 receiver daemon: state_file=" << state_path
+            << " out=" << out_path
+            << " vcodec=" << vcodec_str
+            << " acodec=" << acodec_str
+            << " container=" << container_str
+            << " vbitrate=" << vbitrate_kbps << "kbps"
+            << " gop=" << gop
+            << " hw=" << hw_str
+            << " builtin_ptp=" << (enable_builtin_ptp ? "on" : "off")
+            << "\n";
 
   mtl_sdk::MtlSdkConfig mtl_cfg;
   mtl_cfg.ports.push_back({port_name, sip});
   mtl_cfg.rx_queues = 1;
-  mtl_cfg.enable_builtin_ptp = false;
+  mtl_cfg.enable_builtin_ptp = enable_builtin_ptp;
 
   auto ctx = mtl_sdk::Context::create(mtl_cfg);
   if (!ctx) {
@@ -183,7 +261,7 @@ int main(int argc, char** argv) {
   std::mutex session_mutex;
   ConnectionState current_state;
   int max_frames = 0;
-  const int run_frames = 600;
+  // run_frames 为 0 表示「持续录制直到连接断开」
 
   while (true) {
     ConnectionState state = read_connection_state(state_path);
@@ -210,12 +288,12 @@ int main(int argc, char** argv) {
         current_state.valid = false;
       } else {
         encode_sdk::EncodeParams ep;
-        ep.mux.container = encode_sdk::Container::MP4;
+        ep.mux.container = parse_container(container_str);
         ep.mux.output_path = out_path;
-        ep.video.codec = encode_sdk::VideoCodec::H264;
-        ep.video.hw = encode_sdk::HwAccel::Auto;
-        ep.video.bitrate_kbps = 2000;
-        ep.video.gop = 120;
+        ep.video.codec = parse_video_codec(vcodec_str);
+        ep.video.hw = parse_hw(hw_str);
+        ep.video.bitrate_kbps = vbitrate_kbps;
+        ep.video.gop = gop;
         ep.video.input_fmt = mtl_sdk::VideoPixFmt::YUV422_10BIT;
         ep.video.fps_num = (int)(state.fps + 0.5);
         ep.video.fps_den = 1;
@@ -228,8 +306,8 @@ int main(int argc, char** argv) {
           audio_rx = ctx->create_audio_rx(af, aep);
           if (audio_rx) {
             ep.audio = encode_sdk::AudioEncodeParams{};
-            ep.audio->codec = encode_sdk::AudioCodec::AAC;
-            ep.audio->bitrate_kbps = 128;
+            ep.audio->codec = parse_audio_codec(acodec_str);
+            ep.audio->bitrate_kbps = abitrate_kbps;
             ep.audio->sample_rate = state.audio_sample_rate;
             ep.audio->channels = state.audio_channels;
           } else {
