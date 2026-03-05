@@ -59,7 +59,27 @@
 
 ---
 
-## 四、构建与运行
+## 四、运行本项目的 3 个硬性要求（务必先满足）
+
+1. **网络与端口必须“对得上”**  
+   - **发送端与接收端**的 `--ip`（组播地址）与 `--video-port` 必须一致。  
+   - `--port` 必须匹配你实际使用的链路：  
+     - `kernel:lo`：本机回环  
+     - `kernel:<网卡名>`：内核网卡（Socket）  
+     - `<BDF>`（如 `0000:04:00.0`）：DPDK 网卡（VFIO 绑定后内核不可用）
+   - `--sip` 必须填写“该链路的源 IP”（Kernel 模式=网卡实际 IP；DPDK 模式=写入报文源 IP，**不要求**在内核上配置，但建议仍按同网段规划）。
+
+2. **不要把用于测试的直连网卡配置成永久静态 IP**  
+   - 仅用 `ip addr add ...` 的**临时 IP**做测试；不要用 netplan/NM 做“永久静态”，否则常见会触发 NetworkManager 报错、连接反复 flap、路由异常等问题。  
+   - README 下文给出“添加/删除临时 IP”的标准命令。
+
+3. **DPDK 模式要满足 DPDK/MTL 的运行条件**  
+   - 已完成：IOMMU、HugePages、`vfio-pci`、网卡绑定到 DPDK（见 `docs/需求1_视频流收发部署与使用.md`、`docs/DPDK_MTL_SETUP.md`）。  
+   - DPDK 模式下网卡被 VFIO 接管后，Linux 内核无法 `ping`/无法 `kernel:<iface>` 使用，这是正常现象。
+
+---
+
+## 五、构建与运行
 
 ### 构建
 
@@ -78,7 +98,48 @@ cmake --build . -j
 | **st2110_record** | 接收组播并编码为 MP4 |
 | **av_txrx_demo** | 音视频收发统一示例，支持 PTP、lcores、tasklets 等；DPDK 发送默认 `build/yuv420p10le_1080p.yuv`，见 `--mode send` / `--mode recv` |
 
-**本机回环测试**（先启动接收端再启动发送端，使用回环口 `kernel:lo`）：
+---
+
+## 六、网卡临时 IP（推荐做法：只用于测试，不写永久静态）
+
+### 6.1 两块“支持 DPDK 的直连网卡”如何配置临时 IP
+
+> 这里的“两块网卡”指 **你用于直连收发**的两口（可能同一台机器两口直连，也可能 A/B 两机各一口直连）。  
+> **原则**：只用临时 IP，测试完可删；不要写永久静态 IP，避免 NetworkManager/netplan 相关错误。
+
+假设两口分别为 `enp4s0` 与 `enp6s0`，计划网段为 `192.168.10.0/24`：
+
+```bash
+# 查看网卡名
+ip -br link
+
+# 给两口添加“临时 IP”（不会写入永久配置）
+sudo ip addr add 192.168.10.1/24 dev enp4s0
+sudo ip addr add 192.168.10.2/24 dev enp6s0
+sudo ip link set enp4s0 up
+sudo ip link set enp6s0 up
+
+# 验证
+ip -br addr show dev enp4s0
+ip -br addr show dev enp6s0
+```
+
+测试结束后删除临时 IP：
+
+```bash
+sudo ip addr del 192.168.10.1/24 dev enp4s0
+sudo ip addr del 192.168.10.2/24 dev enp6s0
+```
+
+> 若某网卡已被绑定到 DPDK（`vfio-pci`），该口不会再出现在内核网络栈里，因此无法 `ip addr add`，这也是正常的。Kernel 模式需要网卡处于内核驱动；DPDK 模式则用 `--port <BDF>`。
+
+---
+
+## 七、收发运行命令（按场景直接照抄）
+
+### 7.1 单机 Kernel 回环（`kernel:lo`）如何运行
+
+先启动接收端，再启动发送端（同一台机器，走 loopback）：
 ```bash
 # 终端 1（接收端）
 ./st2110_record --ip 239.0.0.1 --video-port 5004 --audio-port 0 --max-frames 600 recv.mp4 --port kernel:lo
@@ -92,17 +153,57 @@ cmake --build . -j
 ./st2110_send --url build/yuv420p10le_1080p.yuv --width 1920 --height 1080 --duration 30 --audio-port 0 --ip 239.0.0.1 --video-port 5004 --port kernel:lo
 ```
 
-**双机收发测试（Kernel 模式）**：双机收发需先**配置网络**（发送端、接收端网卡与 IP 一致），再在两机分别运行发送端与接收端。
+### 7.2 单机 DPDK “双口回环”（同机两块/两口 DPDK 网卡直连）如何运行
+
+该模式不是 `lo`，而是**同一台机器的两口网卡互相直连**（用网线把两口插在一起），一口跑 TX、一口跑 RX。
+
+前提（只列关键点，完整见 `docs/DPDK_MTL_SETUP.md`）：
+
+- 两口网卡都已绑定到 `vfio-pci`（DPDK 接管后内核不可用）
+- 已配置 hugepages / IOMMU / VFIO
+
+示例：同机两口 BDF 为 `0000:04:00.0`（TX）与 `0000:06:00.0`（RX），你规划两个源 IP（仅用于写入报文源地址）：
+
+- TX：`--port 0000:04:00.0 --sip 192.168.10.1`
+- RX：`--port 0000:06:00.0 --sip 192.168.10.2`
+
+运行（同机两个终端）：
+
+```bash
+# 终端 1：接收端（先启动）
+cd build
+./st2110_record --ip 239.0.0.1 --video-port 5004 --audio-port 0 \
+  --width 1920 --height 1080 --max-frames 600 recv.mp4 \
+  --port 0000:06:00.0 --sip 192.168.10.2 --no-ptp
+
+# 终端 2：发送端（后启动）
+cd build
+./st2110_send --url yuv420p10le_1080p.yuv --width 1920 --height 1080 \
+  --duration 10 --audio-port 0 --ip 239.0.0.1 --video-port 5004 \
+  --port 0000:04:00.0 --sip 192.168.10.1 --no-ptp
+```
+
+> 说明：DPDK 模式下 `--sip` 是写进报文的源 IP，不要求 Linux 真实配置该 IP（因为网卡已被 VFIO 接管），但两端仍应使用同网段规划，避免上层控制/排障混乱。
+
+### 7.3 双机 Kernel 模式如何运行（A 发送、B 接收）
+
+双机收发需先用 **临时 IP** 配好两机直连口（不要永久静态），再在两机分别运行接收与发送。
 
 - **发送端网卡**：`enp4s0`，IP `192.168.10.1`
 - **接收端网卡**：`enp6s0`，IP `192.168.10.2`
 - **发送文件**：`build/yuv420p10le_1080p.yuv`（1920×1080）
 
-网络配置（任选其一）：
-ethtool enp4s0
-ethtool enp6s0
-- **临时**：发送端执行 `sudo ip addr add 192.168.10.1/24 dev enp4s0`；接收端执行 `sudo ip addr add 192.168.10.2/24 dev enp6s0`
-- **固定**：见 [docs/netplan/README.md](docs/netplan/README.md)，发送端用 `99-st2110-sender-enp4s0.yaml`，接收端用 `99-st2110-receiver-enp6s0.yaml`，然后 `sudo netplan apply`
+两机分别执行（临时 IP）：
+
+```bash
+# A（发送端）
+sudo ip addr add 192.168.10.1/24 dev enp4s0
+sudo ip link set enp4s0 up
+
+# B（接收端）
+sudo ip addr add 192.168.10.2/24 dev enp6s0
+sudo ip link set enp6s0 up
+```
 
 **接收端（B 机，先启动）：**
 ```bash
@@ -196,101 +297,160 @@ cd /path/to/GPT_mtl_encode_sdk/build
 | [docs/需求3_路由管理部署与使用.md](docs/需求3_路由管理部署与使用.md) | **需求3** 路由管理运行方式与双机测试流程 |
 | [routing/README.md](routing/README.md) | 路由模块说明 |
 
-## 八、路由管理快速开始（Easy-NMOS）
+## 八、路由管理（Easy-NMOS + IS-05）双机部署与命令（按你的场景 A=发送、B=接收）
 
-### 角色约定
+本节只讲你关心的三件事：
 
-| 机器 | IP | 角色 |
-|------|-----|------|
-| **本机** | 192.168.1.200 | 仅运行 Easy-NMOS（Registry + Controller） |
-| **第二台电脑** | 192.168.1.110 | 运行自研 Sender 与 Receiver 节点 |
+- **Easy-NMOS（Registry + Controller/admin）怎么用 macvlan 跑起来，并且“运行 Easy-NMOS 的那台主机自己也能打开 admin 页面”**  
+- **A 机作为 Sender、B 机作为 Receiver 时，IS-05 服务如何部署/配置（IP、端口）**  
+- **`routing/scripts/register_node_example.py` 怎么传参（IP/PORT）并且每秒 heartbeat**
 
-第二台电脑上 Sender 与 Receiver 属于**同一 Node**，只需**一个 IS-05 服务**（单端口），无需两个不同端口的 IS-05。
+### 8.1 角色与 IP 约定（你可以按实际替换）
 
-### 先运行谁？两个程序有何不同？
+| 机器 | 角色 | 需要运行的东西 |
+|------|------|----------------|
+| **A 机** | Easy-NMOS + 自研 Sender（发音视频） | Docker Easy-NMOS（macvlan），`register_node_example.py --mode sender`，`routing/is05_server/app.py` |
+| **B 机** | 自研 Receiver（收音视频） | `register_node_example.py --mode receiver`，`routing/is05_server/app.py`，`build/is05_receiver_daemon` |
 
-| 程序 | 作用 | 何时运行 |
-|------|------|----------|
-| **register_node_example.py** | 向 Easy-NMOS 的 Registry **注册**本节点（Node/Device/Receiver/Sender），并可选写入 **.nmos_node.json**（供 IS-05 读取 receiver_id/sender_id）。 | **先运行**（至少一次，且带 `--save-config`），之后若需心跳保活可常驻。 |
-| **app.py**（IS-05 服务） | 读取 **.nmos_node.json**，对外提供 IS-05 接口（staged/active/connect）；Controller 点 CONNECT 时由它写 **connection_state.json** 驱动收流。 | **后运行**，且需保证已有 .nmos_node.json（或环境变量中的 ID）。 |
+核心 IP/端口变量：
 
-**推荐顺序**：先执行一次注册并保存配置，再启动 IS-05 服务；若已有 `.nmos_node.json`，也可直接运行 `app.py`。
+- **Easy-NMOS Registry/Controller 地址**：`EASY_NMOS_IP=192.168.1.200`（来自 `/home/aa/easy-nmos/docker-compose.yml` 的 `nmos-registry.ipv4_address`）  
+- **IS-05 默认端口**：`IS05_PORT=9090`（可改）  
+- **A_HOST_IP**：A 机操作系统自身在局域网可达的 IP（不是容器 IP）  
+- **B_HOST_IP**：B 机操作系统自身在局域网可达的 IP
 
-### 本机（192.168.1.200）
+### 8.2 在 A 机启动 Easy-NMOS（macvlan），并让 A 主机也能访问 admin
 
-仅需启动并保持 Easy-NMOS 运行，确保 Controller 可访问：
+Easy-NMOS 的 compose 文件固定在：`/home/aa/easy-nmos/docker-compose.yml`。其中网络是 macvlan（`parent: eno1`，容器固定 IP `192.168.1.200/201/203`）。
 
-```
-http://192.168.1.200/admin
-```
+在 **A 机**执行：
 
-### 第二台电脑（192.168.1.110）
-
-在多个终端中依次执行：
-
-**终端 1：注册节点（收发一体，心跳保活）**
 ```bash
-cd /path/to/GPT_mtl_encode_sdk
+cd /home/aa/easy-nmos
+docker compose up -d
+```
+
+macvlan 的限制：**宿主机默认不能访问 macvlan 容器 IP**。要让 A 主机也能打开 `http://192.168.1.200/admin`，在 A 机创建一个“宿主机侧 macvlan 子接口”（临时配置即可）：
+
+```bash
+# 按 docker-compose.yml：parent=eno1
+PARENT_IF=eno1
+
+# 给宿主机创建一个 macvlan 接口（名字可自定义）
+sudo ip link add easy-nmos-host link ${PARENT_IF} type macvlan mode bridge
+
+# 给这个宿主机 macvlan 接口配置一个同网段 IP（选个不冲突的）
+sudo ip addr add 192.168.1.250/24 dev easy-nmos-host
+sudo ip link set easy-nmos-host up
+
+# 只对容器 IP 加 /32 路由（避免影响整网段路由）
+sudo ip route add 192.168.1.200/32 dev easy-nmos-host
+sudo ip route add 192.168.1.201/32 dev easy-nmos-host
+sudo ip route add 192.168.1.203/32 dev easy-nmos-host
+```
+
+现在 A 主机、B 机、以及其他同网段电脑都应能访问：
+
+- Easy-NMOS admin：`http://192.168.1.200/admin`
+
+> 若你从“另一台电脑”的浏览器打开 admin，那么浏览器后续会直接访问 A/B 节点的 `--href`（IS-05 地址），因此 **A_HOST_IP / B_HOST_IP 与 9090 端口必须从浏览器所在机器可达**（防火墙放行）。
+
+### 8.3 IS-05 的 IP/端口怎么配置（必须写在 `--href` 里）
+
+这项目里，**IS-05 服务地址=注册脚本的 `--href`**，格式固定：
+
+- `--href http://<节点机器IP>:<IS05_PORT>/`
+
+并且 IS-05 服务端口由环境变量控制：
+
+- `IS05_PORT=9090 python3 routing/is05_server/app.py`
+
+**规则**：
+
+- `--href` 里的 IP 必须填“运行 IS-05 服务那台机器的真实 IP”（A_HOST_IP 或 B_HOST_IP），不能填 `127.0.0.1`，否则从别处打开 admin 会访问不到。  
+- `--href` 的端口必须与 `IS05_PORT` 一致，否则 admin 会报错（CONNECT/ACTIVE/TRANSPORT FILE 不可用）。
+
+### 8.4 A 机（Sender）如何注册 + 1 秒心跳 + 启动 IS-05（给 admin 提供 transportfile）
+
+在 **A 机**（项目根目录）执行：
+
+```bash
+cd /home/aa/GPT_mtl_encode_sdk
+
+# Easy-NMOS Registry/Controller 在 192.168.1.200（容器 IP）
 export REGISTRY_URL=http://192.168.1.200
 
-python3 routing/scripts/register_node_example.py --mode both \
-  --heartbeat --interval 10 \
-  --href http://192.168.1.110:9090/ \
+# 关键：--href 里填 A 机自己可达的 IP（A_HOST_IP）+ IS05_PORT
+python3 routing/scripts/register_node_example.py --mode sender \
+  --heartbeat --interval 1 \
+  --href http://<A_HOST_IP>:9090/ \
   --save-config .nmos_node.json
+
+# 启动 IS-05（Sender 端也需要跑，否则 admin 拉不到 sender 的 transportfile / staged / active）
+IS05_PORT=9090 python3 routing/is05_server/app.py
 ```
 
-> 若当前目录已经存在 `.nmos_node.json`，注册脚本会**复用其中的 `node_id`/`device_id`/`receiver_id`/`sender_id`**，仅更新 href/hostname 和版本号，避免 Receiver ID 在 Registry 与 IS-05 之间不一致。可以安全地多次运行上述命令。
+### 8.5 B 机（Receiver）如何注册 + 1 秒心跳 + 启动 IS-05 + 运行 daemon（让 CONNECT 真正驱动收流）
 
-**终端 2：IS-05 服务（单端口同时服务 Sender 与 Receiver）**
+在 **B 机**执行：
+
 ```bash
-cd /path/to/GPT_mtl_encode_sdk
+cd /home/aa/GPT_mtl_encode_sdk
 export REGISTRY_URL=http://192.168.1.200
-export CONNECTION_STATE_FILE=./connection_state.json
 
-python3 routing/is05_server/app.py
+python3 routing/scripts/register_node_example.py --mode receiver \
+  --heartbeat --interval 1 \
+  --href http://<B_HOST_IP>:9090/ \
+  --save-config .nmos_node.json
+
+# Receiver 侧 IS-05：PATCH activate_immediate 会写 connection_state.json
+CONNECTION_STATE_FILE=./connection_state.json IS05_PORT=9090 \
+  python3 routing/is05_server/app.py
 ```
 
-**终端 3：收流 daemon（在 Controller 中 CONNECT 后驱动 MTL 收流并编码）**
-```bash
-cd /path/to/GPT_mtl_encode_sdk/build
+另开一个终端在 **B 机**运行收流 daemon（读取上面写的 connection_state）：
 
+```bash
+cd /home/aa/GPT_mtl_encode_sdk/build
 ./is05_receiver_daemon
 ```
 
-**一键运行（注册 + IS-05 服务）**
+### 8.6 在 admin 里如何“用 IS-05 服务”（操作顺序）
 
-若希望一条命令先完成注册再启动 IS-05 服务（可带心跳），可在项目根目录执行：
+1. 打开 `http://192.168.1.200/admin`  
+2. 确认能看到 A 机注册出来的 **Sender**，以及 B 机注册出来的 **Receiver**  
+3. 在 **Receivers** 里选 B 的 Receiver，点击 **CONNECT**，选择 A 的 Sender  
+4. 确认后，浏览器会对 `http://<B_HOST_IP>:9090/x-nmos/connection/v1.1/single/receivers/<receiver_id>/staged` 发 PATCH（`activate_immediate`）  
+5. B 上 IS-05 会写 `connection_state.json`，B 上 `is05_receiver_daemon` 轮询到变更后开始按新连接收流/编码
+
+### 8.7 `register_node_example.py` 的输入参数（重点讲 IP 与 PORT 怎么填）
+
+脚本：`routing/scripts/register_node_example.py`
+
+- **`REGISTRY_URL`（环境变量）**：填 Easy-NMOS 的地址  
+  - 你的场景固定为：`export REGISTRY_URL=http://192.168.1.200`
+- **`--href`（必须正确）**：填“节点机器对外可达的 IS-05 地址”  
+  - A（Sender）：`--href http://<A_HOST_IP>:9090/`  
+  - B（Receiver）：`--href http://<B_HOST_IP>:9090/`
+- **`--mode receiver|sender|both`**：注册的角色  
+  - A 发：用 `sender`  
+  - B 收：用 `receiver`  
+  - 若某台机器同时发+收：用 `both`
+- **`--save-config .nmos_node.json`（强烈建议）**：把 `node_id/device_id/receiver_id/sender_id` 保存下来  
+  - IS-05 服务端会读取它（默认文件名就是 `.nmos_node.json`）  
+  - 复用同一个 `.nmos_node.json` 可避免每次重跑导致 ID 变化，从而出现“Registry 里的 receiver_id 与 IS-05 里不一致”
+- **`--heartbeat --interval 1`（你要求的每秒心跳）**：每 1 秒重新注册一次，保持节点不从 Registry 消失  
+  - `--interval` 建议 **<= 10**（脚本内说明：避免 Registry TTL 到期导致节点闪烁）
+
+如果你想一条命令在某台机器上“注册 + 1s 心跳 + 启动 IS-05”，也可以用脚本：
 
 ```bash
-cd /path/to/GPT_mtl_encode_sdk
+cd /home/aa/GPT_mtl_encode_sdk
 export REGISTRY_URL=http://192.168.1.200
-
-# 仅注册一次并启动 IS-05（Ctrl+C 只停 IS-05）
-./routing/scripts/run_routing_node.sh
-
-# 带心跳：后台持续向 Registry 心跳，前台运行 IS-05（Ctrl+C 会同时停止心跳与 IS-05）
-./routing/scripts/run_routing_node.sh --heartbeat
+NODE_HREF=http://<本机IP>:9090/ ./routing/scripts/run_routing_node.sh --heartbeat --mode receiver --interval 1
 ```
 
-通过环境变量或脚本参数指定配置，例如：
-
-```bash
-export REGISTRY_URL=http://192.168.1.200
-export NODE_HREF=http://192.168.1.110:9090/
-./routing/scripts/run_routing_node.sh --mode both --heartbeat
-```
-
-脚本会先执行一次 `register_node_example.py --save-config .nmos_node.json`，再启动 `routing/is05_server/app.py`；`--heartbeat` 时在后台运行注册心跳。详见 `routing/scripts/run_routing_node.sh --help`。
-
-### 使用流程
-
-1. 在任意电脑浏览器打开 `http://192.168.1.200/admin`
-2. 在 Nodes / Receivers / Senders 中应看到 192.168.1.110 注册的节点
-3. 选一个 Receiver，点 **CONNECT**，选择要连接的 Sender，确认激活
-4. 第二台电脑上的 `is05_receiver_daemon` 会按连接参数收流并写 MP4
-
-> 若 Easy-NMOS 运行在 Docker 中，第二台电脑需能访问 192.168.1.200；网络不通时可参考 [docs/需求3_路由管理部署与使用.md](docs/需求3_路由管理部署与使用.md) 中的 macvlan 等配置。  
-> IS-05 服务端与 daemon 说明见 [routing/is05_server/README.md](routing/is05_server/README.md)。
+> A 机做 sender 时，把 `--mode receiver` 改成 `--mode sender`；B 机做 receiver 时保持 receiver。
 
 ## 九、测试
 
