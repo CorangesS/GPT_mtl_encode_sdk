@@ -45,9 +45,10 @@
 
 | 脚本/服务 | 说明 |
 |----------|------|
-| `scripts/register_node_example.py` | 向 Registry 注册 Node/Device/Receiver（及可选 Sender）；`--mode receiver\|sender\|both`；`--heartbeat`；`--href` 需浏览器可达；`--save-config PATH` 供 IS-05 使用。 |
+| `scripts/register_node_example.py` | 向 Registry 注册 Node/Device/Receiver（及可选 Sender）；`--mode receiver\|sender\|both`；`--heartbeat`；`--href` 需浏览器可达；`--save-config PATH` 供 IS-05 使用。**应先运行**（至少一次并 `--save-config`），再启动 IS-05。 |
+| `scripts/run_routing_node.sh` | **一键运行**：先执行一次注册并写入配置，再启动 IS-05 服务；可选 `--heartbeat` 后台心跳。需设置 `REGISTRY_URL`，可选 `NODE_HREF`。 |
 | `scripts/run_with_nmos.sh` | 在后台启动 NMOS 注册，并运行 st2110_record 收流编码。 |
-| **is05_server/** | IS-05 Connection API 服务端（Python）；PATCH 激活时写 connection_state.json，供 is05_receiver_daemon 驱动 MTL RX。见 [is05_server/README.md](is05_server/README.md)。 |
+| **is05_server/** | IS-05 Connection API 服务端（Python）；PATCH 激活时写 connection_state.json，供 is05_receiver_daemon 驱动 MTL RX。见 [is05_server/README.md](is05_server/README.md)。**依赖** .nmos_node.json（由注册脚本生成）。 |
 
 ## 与 MTL/Encode SDK 的边界
 

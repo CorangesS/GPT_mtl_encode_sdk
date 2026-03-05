@@ -317,6 +317,46 @@ def main():
         args.href, args.hostname, args.mode
     )
 
+    # 若已存在保存的配置文件，则复用其中的 ID，避免 Receiver/Node 在 Easy-NMOS 中反复变化导致
+    # IS-05 与 Registry 中的 receiver_id / sender_id 不同步。
+    existing_config = None
+    if args.save_config and os.path.isfile(args.save_config):
+        try:
+            with open(args.save_config, "r", encoding="utf-8") as f:
+                existing_config = json.load(f)
+        except Exception:
+            existing_config = None
+
+    if existing_config:
+        old_nid = existing_config.get("node_id")
+        old_did = existing_config.get("device_id")
+        old_rid = existing_config.get("receiver_id")
+        old_sid = existing_config.get("sender_id")
+
+        if old_nid:
+            nid = old_nid
+            node["id"] = old_nid
+            device["node_id"] = old_nid
+        if old_did:
+            did = old_did
+            device["id"] = old_did
+            if receiver:
+                receiver["device_id"] = old_did
+            if source:
+                source["device_id"] = old_did
+            if flow:
+                flow["device_id"] = old_did
+            if sender:
+                sender["device_id"] = old_did
+        if old_rid and receiver:
+            rid = old_rid
+            receiver["id"] = old_rid
+            device["receivers"] = [old_rid]
+        if old_sid and sender:
+            sid = old_sid
+            sender["id"] = old_sid
+            device["senders"] = [old_sid]
+
     # 首次注册
     print("Registering Node (mode=%s)..." % args.mode)
     print("Registry base:", base)

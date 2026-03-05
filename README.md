@@ -207,6 +207,15 @@ cd /path/to/GPT_mtl_encode_sdk/build
 
 第二台电脑上 Sender 与 Receiver 属于**同一 Node**，只需**一个 IS-05 服务**（单端口），无需两个不同端口的 IS-05。
 
+### 先运行谁？两个程序有何不同？
+
+| 程序 | 作用 | 何时运行 |
+|------|------|----------|
+| **register_node_example.py** | 向 Easy-NMOS 的 Registry **注册**本节点（Node/Device/Receiver/Sender），并可选写入 **.nmos_node.json**（供 IS-05 读取 receiver_id/sender_id）。 | **先运行**（至少一次，且带 `--save-config`），之后若需心跳保活可常驻。 |
+| **app.py**（IS-05 服务） | 读取 **.nmos_node.json**，对外提供 IS-05 接口（staged/active/connect）；Controller 点 CONNECT 时由它写 **connection_state.json** 驱动收流。 | **后运行**，且需保证已有 .nmos_node.json（或环境变量中的 ID）。 |
+
+**推荐顺序**：先执行一次注册并保存配置，再启动 IS-05 服务；若已有 `.nmos_node.json`，也可直接运行 `app.py`。
+
 ### 本机（192.168.1.200）
 
 仅需启动并保持 Easy-NMOS 运行，确保 Controller 可访问：
@@ -230,6 +239,8 @@ python3 routing/scripts/register_node_example.py --mode both \
   --save-config .nmos_node.json
 ```
 
+> 若当前目录已经存在 `.nmos_node.json`，注册脚本会**复用其中的 `node_id`/`device_id`/`receiver_id`/`sender_id`**，仅更新 href/hostname 和版本号，避免 Receiver ID 在 Registry 与 IS-05 之间不一致。可以安全地多次运行上述命令。
+
 **终端 2：IS-05 服务（单端口同时服务 Sender 与 Receiver）**
 ```bash
 cd /path/to/GPT_mtl_encode_sdk
@@ -245,6 +256,31 @@ cd /path/to/GPT_mtl_encode_sdk/build
 
 ./is05_receiver_daemon
 ```
+
+**一键运行（注册 + IS-05 服务）**
+
+若希望一条命令先完成注册再启动 IS-05 服务（可带心跳），可在项目根目录执行：
+
+```bash
+cd /path/to/GPT_mtl_encode_sdk
+export REGISTRY_URL=http://192.168.1.200
+
+# 仅注册一次并启动 IS-05（Ctrl+C 只停 IS-05）
+./routing/scripts/run_routing_node.sh
+
+# 带心跳：后台持续向 Registry 心跳，前台运行 IS-05（Ctrl+C 会同时停止心跳与 IS-05）
+./routing/scripts/run_routing_node.sh --heartbeat
+```
+
+通过环境变量或脚本参数指定配置，例如：
+
+```bash
+export REGISTRY_URL=http://192.168.1.200
+export NODE_HREF=http://192.168.1.110:9090/
+./routing/scripts/run_routing_node.sh --mode both --heartbeat
+```
+
+脚本会先执行一次 `register_node_example.py --save-config .nmos_node.json`，再启动 `routing/is05_server/app.py`；`--heartbeat` 时在后台运行注册心跳。详见 `routing/scripts/run_routing_node.sh --help`。
 
 ### 使用流程
 
