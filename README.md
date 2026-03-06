@@ -92,6 +92,7 @@ cmake --build . -j
 
 ### 运行示例
 
+
 | 程序 | 作用 |
 |------|------|
 | **st2110_send** | 发送 ST2110 组播 |
@@ -143,6 +144,13 @@ sudo ip addr del 192.168.10.2/24 dev enp6s0
 ```bash
 # 终端 1（接收端）
 ./st2110_record --ip 239.0.0.1 --video-port 5004 --audio-port 0 --max-frames 600 recv.mp4 --port kernel:lo
+
+
+./st2110_record --ip 239.0.0.1 --video-port 5004 --audio-port 0 --max-frames 600 --vcodec h265 --container mxf --port kernel:lo recv.mxf
+
+./st2110_record --ip 239.0.0.1 --video-port 5004 --audio-port 0 --max-frames 600 --vcodec h265 --container mxf --port kernel:lo recv.mxf
+
+./st2110_record --sdp send.sdp --vcodec h265 --container mxf recv.mxf
 
 # 终端 2（发送端）
 ./st2110_send --ip 239.0.0.1 --video-port 5004 --audio-port 0 --duration 10 --port kernel:lo
@@ -216,7 +224,7 @@ cd build
 **发送端（A 机，后启动）：**
 ```bash
 cd build
-./st2110_send --url build/yuv420p10le_1080p.yuv --width 1920 --height 1080 \
+./st2110_send --url yuv420p10le_1080p.yuv --width 1920 --height 1080 \
   --duration 30 --audio-port 0 --ip 239.0.0.1 --video-port 5004 \
   --port kernel:enp4s0 --sip 192.168.10.1 --no-ptp
 ```
