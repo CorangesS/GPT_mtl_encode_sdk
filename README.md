@@ -146,11 +146,11 @@ sudo ip addr del 192.168.10.2/24 dev enp6s0
 ./st2110_record --ip 239.0.0.1 --video-port 5004 --audio-port 0 --max-frames 600 recv.mp4 --port kernel:lo
 
 
-./st2110_record --ip 239.0.0.1 --video-port 5004 --audio-port 0 --max-frames 600 --vcodec h265 --container mxf --port kernel:lo recv.mxf
+# ./st2110_record --ip 239.0.0.1 --video-port 5004 --audio-port 0 --max-frames 600 --vcodec h265 --container mxf --port kernel:lo recv.mxf
 
-./st2110_record --ip 239.0.0.1 --video-port 5004 --audio-port 0 --max-frames 600 --vcodec h265 --container mxf --port kernel:lo recv.mxf
+# ./st2110_record --ip 239.0.0.1 --video-port 5004 --audio-port 0 --max-frames 600 --vcodec h265 --container mxf --port kernel:lo recv.mxf
 
-./st2110_record --sdp send.sdp --vcodec h265 --container mxf recv.mxf
+# ./st2110_record --sdp send.sdp --vcodec h265 --container mxf recv.mxf
 
 # 终端 2（发送端）
 ./st2110_send --ip 239.0.0.1 --video-port 5004 --audio-port 0 --duration 10 --port kernel:lo
