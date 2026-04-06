@@ -3,6 +3,7 @@
 
 #include "mtl_sdk/mtl_sdk.hpp"
 #include "encode_sdk/encode_sdk.hpp"
+#include "frame_transport/frame_transport.hpp"
 
 #include <iostream>
 #include <fstream>
@@ -13,6 +14,27 @@
 #include <cstdlib>
 #include <mutex>
 #include <algorithm>
+
+struct EncodeWorker {
+  frame_transport::BoundedFrameQueue queue{64};
+  std::thread thread;
+
+  void start(encode_sdk::Session& enc) {
+    thread = std::thread([this, &enc]() {
+      frame_transport::FramePacket packet;
+      while (queue.pop(packet)) {
+        mtl_sdk::VideoFrame frame;
+        packet.to_video_frame(frame);
+        enc.push_video(frame);
+      }
+    });
+  }
+
+  void stop() {
+    queue.close();
+    if (thread.joinable()) thread.join();
+  }
+};
 
 static std::string connection_state_path() {
   const char* p = std::getenv("CONNECTION_STATE_FILE");
@@ -258,9 +280,11 @@ int main(int argc, char** argv) {
   std::unique_ptr<mtl_sdk::Context::VideoRxSession> video_rx;
   std::unique_ptr<mtl_sdk::Context::AudioRxSession> audio_rx;
   std::unique_ptr<encode_sdk::Session> enc;
+  std::unique_ptr<EncodeWorker> encode_worker;
   std::mutex session_mutex;
   ConnectionState current_state;
   int max_frames = 0;
+  frame_transport::ReceiverToSinkAdapter rx_adapter;
   // run_frames 为 0 表示「持续录制直到连接断开」
 
   while (true) {
@@ -273,6 +297,10 @@ int main(int argc, char** argv) {
       std::lock_guard<std::mutex> lock(session_mutex);
       video_rx.reset();
       audio_rx.reset();
+      if (encode_worker) {
+        encode_worker->stop();
+        encode_worker.reset();
+      }
       enc.reset();
 
       mtl_sdk::VideoFormat vf;
@@ -323,6 +351,8 @@ int main(int argc, char** argv) {
           video_rx.reset();
           audio_rx.reset();
         } else {
+          encode_worker = std::make_unique<EncodeWorker>();
+          encode_worker->start(*enc);
           current_state = state;
           max_frames = run_frames;
           std::cout << "Activated: " << state.video_ip << ":" << state.video_port
@@ -333,21 +363,27 @@ int main(int argc, char** argv) {
       std::lock_guard<std::mutex> lock(session_mutex);
       video_rx.reset();
       audio_rx.reset();
+      if (encode_worker) {
+        encode_worker->stop();
+        encode_worker.reset();
+      }
       if (enc) { enc->close(); enc.reset(); }
       current_state.valid = false;
     }
 
-    if (video_rx && enc && max_frames > 0) {
-      mtl_sdk::VideoFrame frame;
-      if (video_rx->poll(frame, 100)) {
-        enc->push_video(frame);
-        video_rx->release(frame);
+    if (video_rx && enc && encode_worker && max_frames > 0) {
+      auto result = rx_adapter.pump_once(*video_rx, encode_worker->queue, 100);
+      if (result == frame_transport::PumpResult::Forwarded) {
         max_frames--;
-        if (max_frames == 0) {
-          enc->close();
-          enc.reset();
-          std::cout << "Wrote " << out_path << "\n";
-        }
+      } else if (result == frame_transport::PumpResult::InvalidFrame) {
+        std::cerr << "is05_receiver_daemon: skipped invalid frame\n";
+      }
+      if (max_frames == 0) {
+        encode_worker->stop();
+        encode_worker.reset();
+        enc->close();
+        enc.reset();
+        std::cout << "Wrote " << out_path << "\n";
       }
     }
 

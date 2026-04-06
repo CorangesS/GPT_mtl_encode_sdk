@@ -5,14 +5,13 @@
 
 #include "mtl_sdk/mtl_sdk.hpp"
 #include "encode_sdk/encode_sdk.hpp"
+#include "frame_transport/frame_transport.hpp"
+#include "frame_store/ring_slice_store.hpp"
 
+#include <atomic>
+#include <iomanip>
 #include <iostream>
 #include <thread>
-#include <mutex>
-#include <condition_variable>
-#include <queue>
-#include <atomic>
-#include <cstring>
 
 static void usage(const char* prog) {
   std::cerr << "Usage: " << prog << " [options] [output.mp4]\n"
@@ -30,92 +29,18 @@ static void usage(const char* prog) {
             << "  --lcores <list>         DPDK lcores for MTL, e.g. 0-3 or 2,3,4,5 (faster RX)\n"
             << "  --main-lcore <id>       Main lcore id (default: MTL auto)\n"
             << "  --tasklets <n>          Tasklets per lcore; 0=auto (try 16 if slow)\n"
-            << "  --data-quota-mbs <n>    Max data quota MB/s per lcore; 0=auto\n";
+            << "  --data-quota-mbs <n>    Max data quota MB/s per lcore; 0=auto\n"
+            << "  --decode                Enable decode/encode pipeline and write output.mp4\n"
+            << "  --progress              Show non-blocking progress for decode/store/receive\n"
+            << "  --store-root <dir>      Store received raw frames as ring slices under <dir>\n"
+            << "  --channel-id <id>       Channel name for ring slice store (default: channel_main)\n"
+            << "  --slice-seconds <n>     Seal slice every N seconds (default: 60 in store mode)\n"
+            << "  --slice-max-bytes <n>   Seal slice when bytes reach N (default: 0 disabled)\n"
+            << "  --retention-bytes <n>   Recycle oldest sealed slices when total bytes exceed N\n"
+            << "  --retention-slices <n>  Recycle oldest slices when slice count exceeds N\n"
+            << "  --min-reserved-slices <n> Keep at least N newest slices even during recycle\n"
+            << "  --min-unprocessed-slices <n> Keep at least N non-processed slices\n";
 }
-
-// Copy of video frame data for async pipeline (release RX buffer immediately after copy)
-// MTL backend outputs YUV422_10BIT with 3 planes (Y, U, V).
-struct FrameCopy {
-  mtl_sdk::VideoFormat fmt;
-  int64_t timestamp_ns;
-  std::vector<uint8_t> y, u, v;
-  int linesize_y, linesize_uv;
-
-  static FrameCopy from(const mtl_sdk::VideoFrame& f) {
-    FrameCopy fc;
-    fc.fmt = f.fmt;
-    fc.timestamp_ns = f.timestamp_ns;
-    fc.linesize_y = f.planes[0].linesize;
-    fc.linesize_uv = f.planes[1].linesize;
-    size_t y_sz = (size_t)f.fmt.height * f.planes[0].linesize;
-    size_t uv_sz = (size_t)f.fmt.height * f.planes[1].linesize;
-    // MTL backend always provides 3-plane YUV422; validate before copy to avoid bad src pointers
-    if (f.num_planes >= 3 && f.planes[0].data && f.planes[1].data && f.planes[2].data &&
-        y_sz > 0 && uv_sz > 0) {
-      fc.y.assign(f.planes[0].data, f.planes[0].data + y_sz);
-      fc.u.assign(f.planes[1].data, f.planes[1].data + uv_sz);
-      fc.v.assign(f.planes[2].data, f.planes[2].data + uv_sz);
-    }
-    return fc;
-  }
-
-  bool is_valid() const { return !y.empty() && !u.empty() && !v.empty(); }
-
-  void to_video_frame(mtl_sdk::VideoFrame& out) const {
-    if (!is_valid()) return;
-    out = {};
-    out.fmt = fmt;
-    out.timestamp_ns = timestamp_ns;
-    out.mem_type = mtl_sdk::MemoryType::HostPtr;
-    out.num_planes = 3;
-    out.planes[0].data = const_cast<uint8_t*>(y.data());
-    out.planes[0].linesize = linesize_y;
-    out.planes[1].data = const_cast<uint8_t*>(u.data());
-    out.planes[1].linesize = linesize_uv;
-    out.planes[2].data = const_cast<uint8_t*>(v.data());
-    out.planes[2].linesize = linesize_uv;
-    out.bytes_total = y.size() + u.size() + v.size();
-  }
-};
-
-// Bounded blocking queue for async encode
-class FrameQueue {
-public:
-  static constexpr size_t MAX_SIZE = 64;
-
-  void push(FrameCopy fc) {
-    std::unique_lock<std::mutex> lock(m_);
-    while (q_.size() >= MAX_SIZE) {
-      cv_full_.wait(lock);
-    }
-    q_.push(std::move(fc));
-    cv_empty_.notify_one();
-  }
-
-  bool pop(FrameCopy& out) {
-    std::unique_lock<std::mutex> lock(m_);
-    while (q_.empty() && !done_) {
-      cv_empty_.wait_for(lock, std::chrono::milliseconds(100));
-    }
-    if (q_.empty()) return false;
-    out = std::move(q_.front());
-    q_.pop();
-    cv_full_.notify_one();
-    return true;
-  }
-
-  void set_done() {
-    std::lock_guard<std::mutex> lock(m_);
-    done_ = true;
-    cv_empty_.notify_all();
-  }
-
-private:
-  std::queue<FrameCopy> q_;
-  std::mutex m_;
-  std::condition_variable cv_empty_, cv_full_;
-  std::atomic<bool> done_{false};
-};
 
 int main(int argc, char** argv) {
   std::string out = "out.mp4";
@@ -134,6 +59,16 @@ int main(int argc, char** argv) {
   int main_lcore = -1;
   uint32_t tasklets_nb_per_sch = 0;
   uint32_t data_quota_mbs_per_sch = 0;
+  std::string store_root;
+  std::string channel_id = "channel_main";
+  uint32_t slice_seconds = 60;
+  uint64_t slice_max_bytes = 0;
+  uint64_t retention_bytes = 0;
+  uint32_t retention_slices = 0;
+  uint32_t min_reserved_slices = 2;
+  uint32_t min_unprocessed_slices = 0;
+  bool enable_decode = false;
+  bool show_progress = false;
 
   for (int i = 1; i < argc; i++) {
     std::string a = argv[i];
@@ -147,11 +82,21 @@ int main(int argc, char** argv) {
     if (a == "--fps" && i + 1 < argc) { fps = atof(argv[++i]); continue; }
     if (a == "--max-frames" && i + 1 < argc) { max_frames = atoi(argv[++i]); continue; }
     if (a == "--no-ptp") { use_ptp = false; continue; }
+    if (a == "--decode") { enable_decode = true; continue; }
+    if (a == "--progress") { show_progress = true; continue; }
     if (a == "--sdp" && i + 1 < argc) { sdp_path = argv[++i]; continue; }
     if (a == "--lcores" && i + 1 < argc) { lcores = argv[++i]; continue; }
     if (a == "--main-lcore" && i + 1 < argc) { main_lcore = atoi(argv[++i]); continue; }
     if (a == "--tasklets" && i + 1 < argc) { tasklets_nb_per_sch = (uint32_t)atoi(argv[++i]); continue; }
     if (a == "--data-quota-mbs" && i + 1 < argc) { data_quota_mbs_per_sch = (uint32_t)atoi(argv[++i]); continue; }
+    if (a == "--store-root" && i + 1 < argc) { store_root = argv[++i]; continue; }
+    if (a == "--channel-id" && i + 1 < argc) { channel_id = argv[++i]; continue; }
+    if (a == "--slice-seconds" && i + 1 < argc) { slice_seconds = (uint32_t)atoi(argv[++i]); continue; }
+    if (a == "--slice-max-bytes" && i + 1 < argc) { slice_max_bytes = (uint64_t)std::stoull(argv[++i]); continue; }
+    if (a == "--retention-bytes" && i + 1 < argc) { retention_bytes = (uint64_t)std::stoull(argv[++i]); continue; }
+    if (a == "--retention-slices" && i + 1 < argc) { retention_slices = (uint32_t)atoi(argv[++i]); continue; }
+    if (a == "--min-reserved-slices" && i + 1 < argc) { min_reserved_slices = (uint32_t)atoi(argv[++i]); continue; }
+    if (a == "--min-unprocessed-slices" && i + 1 < argc) { min_unprocessed_slices = (uint32_t)atoi(argv[++i]); continue; }
     if (a == "--help" || a == "-h") { usage(argv[0]); return 0; }
     if (a.compare(0, 2, "--") != 0) { out = a; continue; }
   }
@@ -256,6 +201,7 @@ int main(int argc, char** argv) {
   auto v_rx = ctx->create_video_rx(vf, vep);
 
   std::unique_ptr<mtl_sdk::Context::AudioRxSession> a_rx;
+  std::optional<mtl_sdk::AudioFormat> audio_store_format;
   if (audio_port != 0) {
     mtl_sdk::AudioFormat af;
     af.sample_rate = audio_sample_rate;
@@ -263,76 +209,160 @@ int main(int argc, char** argv) {
     af.bits_per_sample = audio_bits;
     mtl_sdk::St2110Endpoint aep{ ip, audio_port, 97 };
     a_rx = ctx->create_audio_rx(af, aep);
+    if (a_rx) audio_store_format = af;
+  }
+
+  const bool store_mode = !store_root.empty();
+  const bool decode_mode = enable_decode && !store_mode;
+  std::atomic<int> received_frames{0};
+  std::atomic<int> output_frames{0};
+  std::atomic<bool> progress_done{false};
+  std::thread progress_thread;
+  std::unique_ptr<frame_store::RingSliceStore> store;
+  if (store_mode) {
+    frame_store::RingStoreConfig cfg;
+    cfg.root_dir = store_root;
+    cfg.channel_id = channel_id;
+    cfg.slice_duration_sec = slice_seconds;
+    cfg.slice_max_bytes = slice_max_bytes;
+    cfg.retention_bytes_limit = retention_bytes;
+    cfg.retention_slice_limit = retention_slices;
+    cfg.min_reserved_slices = min_reserved_slices;
+    cfg.min_unprocessed_slices = min_unprocessed_slices;
+    store = frame_store::RingSliceStore::open(cfg, vf, audio_store_format ? &*audio_store_format : nullptr);
   }
 
   // ---- Encoding SDK: Auto hw (NVENC->QSV->CPU), lower load for stability ----
-  encode_sdk::EncodeParams ep;
-  ep.mux.container = encode_sdk::Container::MP4;
-  ep.mux.output_path = out;
+  std::unique_ptr<encode_sdk::Session> enc;
+  frame_transport::ReceiverToSinkAdapter rx_adapter;
+  frame_transport::BoundedFrameQueue enc_queue(64);
+  std::thread enc_thread;
+  if (decode_mode) {
+    encode_sdk::EncodeParams ep;
+    ep.mux.container = encode_sdk::Container::MP4;
+    ep.mux.output_path = out;
 
-  ep.video.codec = encode_sdk::VideoCodec::H264;
-  ep.video.hw = encode_sdk::HwAccel::Auto;
-  ep.video.bitrate_kbps = 2000;  // Lower for less CPU load
-  ep.video.gop = 120;            // Larger GOP for less load
-  ep.video.profile = "main";
-  ep.video.fps_num = (int)(fps + 0.5);
-  ep.video.fps_den = 1;
-  ep.video.input_fmt = mtl_sdk::VideoPixFmt::YUV422_10BIT;
+    ep.video.codec = encode_sdk::VideoCodec::H264;
+    ep.video.hw = encode_sdk::HwAccel::Auto;
+    ep.video.bitrate_kbps = 2000;
+    ep.video.gop = 120;
+    ep.video.profile = "main";
+    ep.video.fps_num = (int)(fps + 0.5);
+    ep.video.fps_den = 1;
+    ep.video.input_fmt = mtl_sdk::VideoPixFmt::YUV422_10BIT;
 
-  if (audio_port != 0) {
-    ep.audio = encode_sdk::AudioEncodeParams{};
-    ep.audio->codec = encode_sdk::AudioCodec::AAC;
-    ep.audio->bitrate_kbps = 128;
-    ep.audio->sample_rate = 48000;
-    ep.audio->channels = 2;
-  } else {
-    ep.audio = std::nullopt;
-  }
-
-  auto enc = encode_sdk::Session::open(ep);
-  if (!enc) {
-    std::cerr << "Failed to open encoder\n";
-    return 1;
-  }
-
-  // ---- Async: RX copies & releases; encode thread consumes ----
-  FrameQueue enc_queue;
-
-  std::thread enc_thread([&]() {
-    FrameCopy fc;
-    while (enc_queue.pop(fc)) {
-      mtl_sdk::VideoFrame vf_wrap;
-      fc.to_video_frame(vf_wrap);
-      enc->push_video(vf_wrap);
+    if (audio_port != 0) {
+      ep.audio = encode_sdk::AudioEncodeParams{};
+      ep.audio->codec = encode_sdk::AudioCodec::AAC;
+      ep.audio->bitrate_kbps = 128;
+      ep.audio->sample_rate = 48000;
+      ep.audio->channels = 2;
+    } else {
+      ep.audio = std::nullopt;
     }
-  });
+
+    enc = encode_sdk::Session::open(ep);
+    if (!enc) {
+      std::cerr << "Failed to open encoder\n";
+      return 1;
+    }
+
+    enc_thread = std::thread([&]() {
+      frame_transport::FramePacket packet;
+      while (enc_queue.pop(packet)) {
+        mtl_sdk::VideoFrame vf_wrap;
+        packet.to_video_frame(vf_wrap);
+        enc->push_video(vf_wrap);
+        output_frames.fetch_add(1);
+      }
+    });
+  }
+
+  if (show_progress) {
+    progress_thread = std::thread([&]() {
+      while (!progress_done.load()) {
+        const int recv = received_frames.load();
+        const int out_frames = output_frames.load();
+        if (max_frames > 0) {
+          const double recv_pct = std::min(100.0, recv * 100.0 / max_frames);
+          const double out_pct = std::min(100.0, out_frames * 100.0 / max_frames);
+          std::cerr << "\rprogress recv=" << recv << "/" << max_frames
+                    << " (" << std::fixed << std::setprecision(1) << recv_pct << "%)"
+                    << " out=" << out_frames << "/" << max_frames
+                    << " (" << out_pct << "%)" << std::flush;
+        } else {
+          std::cerr << "\rprogress recv=" << recv << " out=" << out_frames << std::flush;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+      }
+    });
+  }
 
   int got = 0;
   while (got < max_frames) {
-    mtl_sdk::VideoFrame vf_out;
-    if (v_rx->poll(vf_out, 0)) {
-      auto fc = FrameCopy::from(vf_out);
-      v_rx->release(vf_out);  // Release immediately after copy
-      if (fc.is_valid()) {
-        enc_queue.push(std::move(fc));
+    if (store_mode) {
+      mtl_sdk::VideoFrame vf_out;
+      if (v_rx->poll(vf_out, 0)) {
+        auto packet = frame_transport::FramePacket::from(vf_out);
+        v_rx->release(vf_out);
+        if (packet.is_valid() && store->write_video(packet)) {
+          got++;
+          received_frames.store(got);
+          output_frames.store(static_cast<int>(store->video_frames_written()));
+        } else {
+          std::cerr << "st2110_record: failed to store video frame\n";
+        }
+      }
+    } else if (decode_mode) {
+      auto result = rx_adapter.pump_once(*v_rx, enc_queue, 0);
+      if (result == frame_transport::PumpResult::Forwarded) {
         got++;
-      } else {
-        std::cerr << "st2110_record: skipped invalid frame (num_planes=" << vf_out.num_planes << ")\n";
+        received_frames.store(got);
+      } else if (result == frame_transport::PumpResult::InvalidFrame) {
+        std::cerr << "st2110_record: skipped invalid frame\n";
+      }
+    } else {
+      mtl_sdk::VideoFrame vf_out;
+      if (v_rx->poll(vf_out, 0)) {
+        v_rx->release(vf_out);
+        got++;
+        received_frames.store(got);
+        output_frames.store(got);
       }
     }
 
     mtl_sdk::AudioFrame af_out;
     if (a_rx && a_rx->poll(af_out, 0)) {
-      enc->push_audio(af_out);
+      if (store_mode) {
+        store->write_audio(af_out);
+      } else if (decode_mode) {
+        enc->push_audio(af_out);
+      }
     }
   }
 
-  enc_queue.set_done();
-  enc_thread.join();
-
-  enc->close();
+  if (store_mode) {
+    store->close();
+    output_frames.store(static_cast<int>(store->video_frames_written()));
+  } else if (decode_mode) {
+    enc_queue.close();
+    enc_thread.join();
+    enc->close();
+    output_frames.store(received_frames.load());
+  }
+  progress_done.store(true);
+  if (progress_thread.joinable()) {
+    progress_thread.join();
+    std::cerr << "\n";
+  }
   ctx->stop();
 
-  std::cout << "Wrote " << out << " (" << got << " frames)\n";
+  if (store_mode) {
+    std::cout << "Stored " << got << " frames under " << store_root << "/" << channel_id << "\n";
+  } else if (decode_mode) {
+    std::cout << "Wrote " << out << " (" << got << " frames)\n";
+  } else {
+    std::cout << "Received " << got << " frames (decode disabled)\n";
+  }
   return 0;
 }
