@@ -10,7 +10,7 @@
 
 | 需求 | 实现 |
 |------|------|
-| PTPv2/IEEE 1588 精准时钟同步 | `MtlSdkConfig` 支持 Built-in PTP 与 External `ptp_get_time_fn`；示例应用 `--no-p 22tp` 可禁用，网卡/模式不支持时自动回退到人工计算时间戳 |
+| PTPv2/IEEE 1588 精准时钟同步 | `MtlSdkConfig` 支持 Built-in PTP 与 External `ptp_get_time_fn`；示例应用 `--no-ptp` 可禁用，网卡/模式不支持时自动回退到人工计算时间戳 |
 | SDP 解析、导入/导出 | `parse_sdp`、`to_sdp`、`load_sdp_file`、`save_sdp_file`（s/o/c/m、a=rtpmap/fmtp/ts-refclk/mediaclk） |
 | 性能指标 | 按实际讨论确定 |
 
@@ -75,15 +75,16 @@ cmake --build . -j
 | 程序 | 作用 |
 |------|------|
 | **st2110_send** | 发送 ST2110 组播 |
-| **st2110_receive_store** | 接收组播并存为 ring slice 切片 |
+| **st2110_receive** | 接收组播；可存为 ring slice 切片或直接输出单个 `.yuv` 文件 |
 | **slice_decode** | 离线读取 ring slice 切片并编码为 MP4/MXF |
+| **yuv_encode** | 离线读取单个 `.yuv` + `.json` 并编码为 MP4/MXF |
 | **st2110_record** | 兼容 sample：支持纯接收 / `--decode` 编码 / `--store-root` 存切片 |
 | **av_txrx_demo** | 音视频收发统一示例，支持 PTP、lcores、tasklets 等；DPDK 发送默认 `build/yuv420p10le_1080p.yuv`，见 `--mode send` / `--mode recv` |
 
 **本机回环测试**（先启动接收端再启动发送端，使用回环口 `kernel:lo`）：
 ```bash
 # 终端 1（接收端：只收并存切片）
-/home/dd/GPT_mtl_encode_sdk/build/st2110_receive_store \
+/home/dd/GPT_mtl_encode_sdk/build/st2110_receive \
   --ip 239.0.0.1 --video-port 5004 --audio-port 0 \
   --max-frames 600 --port kernel:lo --no-ptp \
   --store-root ./ring_store --channel-id channel_main --session-id run1 --progress
@@ -97,6 +98,21 @@ cmake --build . -j
 ```
 
 > 建议同一 `channel-id` 下每次采集使用不同 `--session-id`。`slice_decode` 不指定 `--session-id` 时，会默认只解码该 channel 下的最新会话，避免历史切片被重复拼接。
+
+**单个 YUV 文件落盘 + 离线编码**：
+```bash
+# 终端 1（接收端：直接输出单个 .yuv）
+./st2110_receive --ip 239.0.0.1 --video-port 5004 --audio-port 0 \
+  --max-frames 0 --idle-exit-ms 2000 --port kernel:lo --no-ptp \
+  --yuv-out ./recv_run1.yuv --progress
+
+# 终端 2（发送端）
+./st2110_send --url yuv420p10le_1080p.yuv --width 1920 --height 1080 --duration 30 \
+  --audio-port 0 --ip 239.0.0.1 --video-port 5004 --port kernel:lo
+
+# 终端 3（离线编码）
+./yuv_encode --input-yuv ./recv_run1.yuv --meta ./recv_run1.yuv.json --progress --output recv_run1.mp4
+```
 
 从 YUV 文件做本机回环发送时，发送端可用：
 ```bash
@@ -118,7 +134,7 @@ ethtool enp6s0
 **接收端（B 机，先启动，推荐用切片接收命令）：**
 ```bash
 cd build
-./st2110_receive_store --ip 239.0.0.1 --video-port 5004 --audio-port 0 \
+./st2110_receive --ip 239.0.0.1 --video-port 5004 --audio-port 0 \
   --width 1920 --height 1080 --max-frames 200 \
   --port kernel:enp6s0 --sip 192.168.10.2 --no-ptp \
   --store-root ./ring_store --channel-id channel_main

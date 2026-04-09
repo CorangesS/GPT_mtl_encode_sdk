@@ -77,25 +77,29 @@ target_link_libraries(encode_sdk PRIVATE
 
 # ---- frame_transport ----
 add_library(frame_transport INTERFACE)
-target_include_directories(frame_transport INTERFACE frame_transport/include)
+target_include_directories(frame_transport INTERFACE modules/frame_transport/include)
 target_link_libraries(frame_transport INTERFACE mtl_sdk)
 
 # ---- frame_store ----
 add_library(frame_store STATIC
-  frame_store/src/ring_slice_store.cpp
+  modules/frame_store/src/ring_slice_store.cpp
+  modules/frame_store/src/yuv_file_writer.cpp
 )
-target_include_directories(frame_store PUBLIC frame_store/include)
+target_include_directories(frame_store PUBLIC modules/frame_store/include)
 target_link_libraries(frame_store PUBLIC frame_transport mtl_sdk)
 
 # ---- samples ----
 add_executable(st2110_record samples/st2110_record.cpp)
 target_link_libraries(st2110_record PRIVATE mtl_sdk encode_sdk frame_transport frame_store)
 
-add_executable(st2110_receive_store samples/st2110_receive_store.cpp)
-target_link_libraries(st2110_receive_store PRIVATE mtl_sdk frame_transport frame_store)
+add_executable(st2110_receive samples/st2110_receive.cpp)
+target_link_libraries(st2110_receive PRIVATE mtl_sdk frame_transport frame_store)
 
 add_executable(slice_decode samples/slice_decode.cpp)
 target_link_libraries(slice_decode PRIVATE encode_sdk mtl_sdk)
+
+add_executable(yuv_encode samples/yuv_encode.cpp)
+target_link_libraries(yuv_encode PRIVATE encode_sdk mtl_sdk)
 
 add_executable(st2110_send samples/st2110_send.cpp)
 target_link_libraries(st2110_send PRIVATE mtl_sdk)

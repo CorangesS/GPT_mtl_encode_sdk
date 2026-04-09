@@ -249,23 +249,23 @@ ring_store/
 目标是让 sample 体现“单元化”而不是“收发+编码耦合在一个程序里”：
 - A 端 sample：只做 YUV -> ST2110 send（不再包含任何 encode/封装逻辑）。
 - B 端 sample：拆成两个独立命令，而不是继续把“接收”和“解码”挂在同一个命令参数下：
-  - `st2110_receive_store`：只做 ST2110 receive，并写入 ring slice；
+  - `st2110_receive`：只做 ST2110 receive；可写入 ring slice 或直接输出单个 `.yuv`；
   - `slice_decode`：离线读取 ring slice，启动 decoder/encoder pipeline，并选择输出格式。
 
 当前落地形态：
 1. `st2110_send`
    - 保持发送端职责不变：只发送 YUV/音视频到 ST2110。
-2. `st2110_receive_store`
+2. `st2110_receive`
    - 只负责 `poll(frame) -> FramePacket::from(frame) -> release(frame) -> RingSliceStore::write_*()`；
    - 不链接 `encode_sdk`，不写 MP4/MXF。
-3. `slice_decode`
+3. `slice_decode` / `yuv_encode`
    - 只负责读取 `manifest.json` + `slices/*/index.bin` + `video.frames`；
    - 将恢复出的 `VideoFrame` 送入 `encode_sdk::Session`，输出 `mp4/mxf`。
 4. `st2110_record`
    - 保留为兼容 sample；后续文档与测试流程不再主推它作为“彻底解耦”的入口。
 
 验收标准：
-- `st2110_receive_store` 可以独立完成“纯接收并存切片”；
+- `st2110_receive` 可以独立完成“纯接收并存切片”，也可以直接输出单个 `.yuv` 文件；
 - `slice_decode` 可以在无 `mtl_sdk` 收流参与的情况下完成离线编码；
 - 两个命令只通过切片文件目录通信，不通过进程内函数调用通信。
 
@@ -308,7 +308,7 @@ ring_store/
 
 现在该怎么用
 1. 接收并存切片
-./st2110_receive_store \
+./st2110_receive \
   --store-root ./ring_store \
   --channel-id channel_main \
   --session-id run_a \
@@ -324,13 +324,21 @@ ring_store/
   --session-id run_a \
   --progress recv_2.mp4
 
+（可选）直接输出单个 `.yuv` 文件并离线编码：
+./st2110_receive \
+  --ip 239.0.0.1 --video-port 5004 --audio-port 0 \
+  --max-frames 0 --idle-exit-ms 2000 --port kernel:lo --no-ptp \
+  --yuv-out ./recv_run_a.yuv --progress
+
+./yuv_encode --input-yuv ./recv_run_a.yuv --meta ./recv_run_a.yuv.json --progress --output recv_run_a.mp4
+
 4.播放视频
 ffplay -autoexit /home/dd/GPT_mtl_encode_sdk/build/recv_1.mp4
 
 
 
 598 帧发完就停、仍设一个上限防误跑（推荐）：
-./st2110_receive_store \
+./st2110_receive \
   --store-root ./ring_store \
   --channel-id channel_test3 \
   --ip 239.0.0.1 --video-port 5004 --audio-port 0 \
@@ -340,7 +348,7 @@ ffplay -autoexit /home/dd/GPT_mtl_encode_sdk/build/recv_1.mp4
 
 发端停约 2 秒后进程会退出，并打印 Stored 598 frames ... (stopped: no video for 2000 ms)（帧数以实际为准）。
 不设帧数上限，只靠发端停：
-./st2110_receive_store \
+./st2110_receive \
   --store-root ./ring_store \
   --channel-id channel_test3 \
   ... \
@@ -355,7 +363,7 @@ ffplay -autoexit /home/dd/GPT_mtl_encode_sdk/build/recv_1.mp4
   --channel-id channel_test3 \
   --progress recv_test5.mp4
 
-  ./st2110_receive_store \
+  ./st2110_receive \
   --store-root ./ring_store \
   --channel-id channel_test2 \
   --session-id run_20260406_b \
@@ -376,3 +384,29 @@ ffplay -autoexit /home/dd/GPT_mtl_encode_sdk/build/recv_1.mp4
   --channel-id channel_test2 \
   --session-id run_1 \
   --progress /home/dd/GPT_mtl_encode_sdk/out/recv_run1.mp4
+
+
+
+
+  # 1) 接收端：输出 YUV 到 receive/
+./st2110_receive \
+  --ip 239.0.0.1 --video-port 5004 --audio-port 0 \
+  --max-frames 0 --idle-exit-ms 2000 \
+  --port kernel:lo --no-ptp --progress \
+  --yuv-out ../video/receive/recv_run1.yuv
+
+# 2) 发送端
+./st2110_send \
+  --url yuv420p10le_1080p.yuv \
+  --width 1920 --height 1080 \
+  --duration 30 \
+  --audio-port 0 \
+  --ip 239.0.0.1 --video-port 5004 \
+  --port kernel:lo
+
+# 3) 离线编码：输出视频到 decode/
+./yuv_encode \
+  --input-yuv ../video/receive/recv_run1.yuv \
+  --meta ../video/receive/recv_run1.yuv.json \
+  --vcodec h264 --container mp4 --progress \
+  --output ../video/decode/recv_run1.mp4
