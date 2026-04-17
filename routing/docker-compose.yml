@@ -4,6 +4,11 @@ services:
     image: rhastie/nmos-cpp:latest
     container_name: nmos-registry
     hostname: nmos-registry
+    # 宿主机脚本/浏览器访问 Registry：http://127.0.0.1:8080（需 ports 映射；仅 macvlan IP 时本机常无法直连 .200）
+    ports:
+      - "8080:80"
+      - "8081:81"
+      - "1883:1883"
     volumes:
       - "./registry.json:/home/registry.json"
     environment:

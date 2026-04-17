@@ -21,14 +21,49 @@ except ImportError:
 
 app = Flask(__name__)
 
+# Easy-NMOS admin 与 IS-05 常不在同源（不同 IP/端口），浏览器会发 OPTIONS 预检。
+# 预检失败时 Firefox 报「CORS 请求未能成功」、状态码 (null)；Chrome 类似。
+_CORS_ALLOW_METHODS = "GET, PATCH, POST, OPTIONS, PUT, DELETE, HEAD"
+# 反射浏览器请求的标头；若未带 Request-Headers，则放行常见 fetch 标头（仅 Content-Type 不够）
+_CORS_DEFAULT_HEADERS = (
+    "Content-Type, Accept, Authorization, X-Requested-With, NMOS-API-KEY, Api-Key"
+)
+
+
+@app.before_request
+def _cors_options_preflight():
+    """对仅注册了 GET/PATCH 的路径，Flask 默认 OPTIONS 可能 405，导致预检失败。"""
+    if request.method != "OPTIONS":
+        return None
+    if not request.path.startswith("/x-nmos"):
+        return None
+    return Response(status=204)
+
+
+def _apply_cors_headers(response):
+    """跨域：带 Cookie / credentials 的 fetch 不能使用 Allow-Origin: *，须回显请求 Origin。"""
+    origin = request.headers.get("Origin")
+    if origin:
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+        prev = response.headers.get("Vary")
+        response.headers["Vary"] = f"{prev}, Origin" if prev else "Origin"
+    else:
+        response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = _CORS_ALLOW_METHODS
+    req_h = request.headers.get("Access-Control-Request-Headers")
+    if req_h:
+        response.headers["Access-Control-Allow-Headers"] = req_h
+    else:
+        response.headers["Access-Control-Allow-Headers"] = _CORS_DEFAULT_HEADERS
+    response.headers["Access-Control-Max-Age"] = "86400"
+    return response
+
 
 @app.after_request
 def _cors_headers(response):
     """允许 Easy-NMOS 从其他主机打开 admin 时，浏览器能跨域访问本节点 IS-05。"""
-    response.headers["Access-Control-Allow-Origin"] = "*"
-    response.headers["Access-Control-Allow-Methods"] = "GET, PATCH, POST, OPTIONS"
-    response.headers["Access-Control-Allow-Headers"] = "Content-Type"
-    return response
+    return _apply_cors_headers(response)
 
 
 @app.route("/", methods=["OPTIONS"])
@@ -50,6 +85,7 @@ _sender_staged = {}
 _sender_active = {}
 _scheduled_receiver_activations = {}  # receiver_id -> activation_time_ns
 _scheduled_sender_activations = {}    # sender_id -> activation_time_ns
+_sender_aliases = set()
 
 
 def _load_receiver_id():
@@ -78,6 +114,21 @@ def _load_sender_id():
         except Exception:
             pass
     return None
+
+
+def _resolve_sender_id(sender_id_path):
+    """单 Sender 兼容：允许 Controller 使用与本地配置不同的 sender_id 访问。"""
+    req_sid = (sender_id_path or "").rstrip("/")
+    cfg_sid = _load_sender_id()
+    if not req_sid:
+        return cfg_sid
+    if not cfg_sid:
+        return req_sid
+    if req_sid == cfg_sid:
+        return cfg_sid
+    # Easy-NMOS 可能持有旧/外部注册表中的 sender_id，避免 404 影响 UI。
+    _sender_aliases.add(req_sid)
+    return req_sid
 
 
 def _load_node_id():
@@ -181,6 +232,38 @@ def _is_multicast_ip(ip):
         return False
 
 
+def _coerce_rtp_port(val, default=5004):
+    """IS-05 / NMOS 里端口常为整数，也可能为字符串 'auto'，不可直接 int()。"""
+    if val is None:
+        return default
+    if isinstance(val, str):
+        s = val.strip().lower()
+        if s in ("auto", "automatic", ""):
+            return default
+    try:
+        return int(val)
+    except (TypeError, ValueError):
+        return default
+
+
+def _sender_endpoint_from_transport_leg(p):
+    """从 Sender transport_params 单条 leg 取 SDP 用地址与端口；默认组播 239.0.0.1:5004。"""
+    if not p:
+        return "0.0.0.0", "239.0.0.1", 5004
+    src = p.get("source_ip")
+    if src is None or (isinstance(src, str) and src.strip().lower() in ("auto", "automatic", "")):
+        source_ip = "0.0.0.0"
+    else:
+        source_ip = src
+    dest_ip = "239.0.0.1"
+    for cand in (p.get("destination_ip"), p.get("multicast_ip")):
+        if cand and isinstance(cand, str) and cand.strip().lower() not in ("auto", "automatic", ""):
+            dest_ip = cand
+            break
+    video_port = _coerce_rtp_port(p.get("destination_port"), 5004)
+    return source_ip, dest_ip, video_port
+
+
 def _parse_patch_body(body):
     """Return (video_dict, audio_dict) from transport_params or transport_file."""
     video = None
@@ -189,7 +272,9 @@ def _parse_patch_body(body):
     if tp and isinstance(tp, list) and len(tp) > 0:
         p = tp[0]
         ip = p.get("multicast_ip") or p.get("destination_ip") or "0.0.0.0"
-        port = int(p.get("destination_port", 5004))
+        if isinstance(ip, str) and ip.strip().lower() in ("auto", "automatic", ""):
+            ip = "239.0.0.1"
+        port = _coerce_rtp_port(p.get("destination_port"), 5004)
         video = {
             "ip": ip,
             "udp_port": port,
@@ -358,9 +443,7 @@ def _activation_scheduler():
                 if not tp or (isinstance(tp, list) and len(tp) == 0):
                     tp = _default_rtp_sender_transport_params()
                 p = tp[0] if tp and isinstance(tp, list) and len(tp) > 0 else {}
-                dest_ip = p.get("destination_ip") or p.get("multicast_ip") or "239.0.0.1"
-                video_port = int(p.get("destination_port", 5004))
-                source_ip = p.get("source_ip", "0.0.0.0")
+                source_ip, dest_ip, video_port = _sender_endpoint_from_transport_leg(p)
                 sdp = _make_sdp(sid, source_ip=source_ip, dest_ip=dest_ip, video_port=video_port)
                 transport_file = {"data": sdp, "type": "application/sdp"}
                 _sender_active[sid] = {
@@ -626,19 +709,6 @@ def _receiver_rtp_constraints():
     ]
 
 
-def _sender_rtp_constraints():
-    """IS-05 RTP Sender 约束：单路，供 Controller 在 CONNECT/STAGE 时构建参数面板。"""
-    return [
-        {
-            "source_ip": {"enum": ["auto"], "description": "Sender source interface IP"},
-            "destination_ip": {"description": "RTP destination IP (unicast or multicast)"},
-            "source_port": {"minimum": 1, "maximum": 65535, "description": "RTP source port"},
-            "destination_port": {"minimum": 1, "maximum": 65535, "description": "RTP destination port"},
-            "rtp_enabled": {"enum": [True, False]},
-        }
-    ]
-
-
 def _constraints_response(legs):
     """兼容不同 Controller：既提供 IS-05 constraints 数组，也提供 params 字段。"""
     return {
@@ -657,6 +727,22 @@ def _with_params_alias(obj):
     return out
 
 
+def _with_sender_enable_alias(obj):
+    """
+    兼容 Easy-NMOS / nmos-js：
+    有些 Controller 在 Receiver CONNECT 时不会显式 PATCH Sender 的 master_enable，
+    Easy-NMOS 在 Activate 前会检查 Sender 是否 enabled，于是报 "Sender is not enabled"。
+
+    当 receiver_id 仍为 None 且 master_enable 为 False 时，返回时视为已启用，避免阻断 CONNECT 流程。
+    """
+    if not isinstance(obj, dict):
+        return obj
+    out = dict(obj)
+    if out.get("receiver_id") is None and out.get("master_enable") is False:
+        out["master_enable"] = True
+    return out
+
+
 @app.route(f"{BASE}/receivers/<path:receiver_id_path>/constraints/", methods=["GET"])
 @app.route(f"{BASE}/receivers/<path:receiver_id_path>/constraints", methods=["GET"])
 def get_constraints(receiver_id_path):
@@ -672,7 +758,7 @@ def get_transporttype(receiver_id_path):
     rid = receiver_id_path.rstrip("/")
     if rid != _load_receiver_id():
         return jsonify({"error": "receiver not found"}), 404
-    return jsonify("urn:x-nmos:transport:rtp.ucast")
+    return jsonify("urn:x-nmos:transport:rtp")
 
 
 # ---------- Sender 端 IS-05（STAGED / ACTIVE / TRANSPORTFILE）----------
@@ -689,10 +775,44 @@ def _default_rtp_sender_transport_params():
     ]
 
 
+def _normalize_sender_transport_params(tp):
+    """归一化 sender transport_params，避免出现 [{}] 或缺字段导致前端无法匹配/渲染。"""
+    default_leg = _default_rtp_sender_transport_params()[0]
+    if not isinstance(tp, list) or len(tp) == 0:
+        return [dict(default_leg)]
+    out = []
+    for leg in tp:
+        merged = dict(default_leg)
+        if isinstance(leg, dict):
+            merged.update(leg)
+        # 地址/端口字段保持字符串，避免前端 match/正则时报错
+        for k in ("source_ip", "destination_ip", "source_port", "destination_port"):
+            if merged.get(k) is None:
+                merged[k] = default_leg.get(k)
+        out.append(merged)
+    return out
+
+
+def _sender_rtp_constraints():
+    """IS-05 RTP Sender 约束：单路，供 Controller 在 CONNECT/STAGE 时构建参数面板。"""
+    return [
+        {
+            "source_ip": {"enum": ["auto"], "description": "Sender source interface IP"},
+            "destination_ip": {"description": "RTP destination IP (unicast or multicast)"},
+            "source_port": {"minimum": 1, "maximum": 65535, "description": "RTP source port"},
+            "destination_port": {"minimum": 1, "maximum": 65535, "description": "RTP destination port"},
+            "rtp_enabled": {"enum": [True, False]},
+        }
+    ]
+
+
 def _default_sender_staged(sid):
     return {
         "receiver_id": None,
-        "master_enable": False,
+        # 部分 Controller 在 Receiver CONNECT 时不会显式 PATCH Sender master_enable，
+        # 前端会在 Activate 前检查 Sender 是否 enabled，导致报 "Sender is not enabled"。
+        # 为保证 Receiver 连接流程可用，这里默认开启 Sender master_enable。
+        "master_enable": True,
         "activation": {"mode": None, "requested_time": None, "activation_time": None},
         "transport_params": _default_rtp_sender_transport_params(),
     }
@@ -717,15 +837,21 @@ def _make_sdp(sender_id, source_ip="0.0.0.0", dest_ip="239.0.0.1", video_port=50
 @app.route(f"{BASE}/senders", methods=["GET"])
 def get_senders():
     sid = _load_sender_id()
-    if not sid:
+    ids = []
+    if sid:
+        ids.append(sid)
+    for alias in sorted(_sender_aliases):
+        if alias not in ids:
+            ids.append(alias)
+    if not ids:
         return jsonify([])
-    return jsonify([f"{sid}/"])
+    return jsonify([f"{v}/" for v in ids])
 
 
 @app.route(f"{BASE}/senders/<path:sender_id_path>", methods=["GET"])
 def get_sender_sub(sender_id_path):
-    sid = sender_id_path.rstrip("/")
-    if sid != _load_sender_id():
+    sid = _resolve_sender_id(sender_id_path)
+    if not sid:
         return jsonify({"error": "sender not found"}), 404
     return jsonify(["staged/", "active/", "constraints/", "transportfile/", "transporttype/"])
 
@@ -733,17 +859,18 @@ def get_sender_sub(sender_id_path):
 @app.route(f"{BASE}/senders/<path:sender_id_path>/staged/", methods=["GET"])
 @app.route(f"{BASE}/senders/<path:sender_id_path>/staged", methods=["GET"])
 def get_sender_staged(sender_id_path):
-    sid = sender_id_path.rstrip("/")
-    if sid != _load_sender_id():
+    sid = _resolve_sender_id(sender_id_path)
+    if not sid:
         return jsonify({"error": "sender not found"}), 404
-    return jsonify(_with_params_alias(_sender_staged.get(sid, _default_sender_staged(sid))))
+    obj = _sender_staged.get(sid, _default_sender_staged(sid))
+    return jsonify(_with_params_alias(_with_sender_enable_alias(obj)))
 
 
 @app.route(f"{BASE}/senders/<path:sender_id_path>/staged/", methods=["PATCH"])
 @app.route(f"{BASE}/senders/<path:sender_id_path>/staged", methods=["PATCH"])
 def patch_sender_staged(sender_id_path):
-    sid = sender_id_path.rstrip("/")
-    if sid != _load_sender_id():
+    sid = _resolve_sender_id(sender_id_path)
+    if not sid:
         return jsonify({"error": "sender not found"}), 404
     body = request.get_json(force=True, silent=True) or {}
     activation = body.get("activation") or {}
@@ -753,23 +880,24 @@ def patch_sender_staged(sender_id_path):
     # 仅当 body 中包含该字段时才更新，与 Receiver 端逻辑一致，避免误清空
     if "receiver_id" in body:
         staged["receiver_id"] = body.get("receiver_id")
+        # 有的 Controller 只更新 receiver_id，不显式下发 master_enable。
+        # 前端在 Activate 时会校验 sender 是否 enabled，所以这里默认开启。
+        if "master_enable" not in body:
+            staged["master_enable"] = True
     if "master_enable" in body:
         staged["master_enable"] = body.get("master_enable", True)
     staged["activation"] = activation
     if "transport_params" in body:
-        staged["transport_params"] = body["transport_params"]
+        staged["transport_params"] = _normalize_sender_transport_params(body["transport_params"])
+    staged["transport_params"] = _normalize_sender_transport_params(staged.get("transport_params"))
     _sender_staged[sid] = staged
 
     if mode == "activate_immediate":
         activation_time = f"{int(time.time() * 1e9)}:0"
-        tp = staged.get("transport_params")
-        if not tp or (isinstance(tp, list) and len(tp) == 0):
-            tp = _default_rtp_sender_transport_params()
+        tp = _normalize_sender_transport_params(staged.get("transport_params"))
         # ACTIVE 中附带 transport_file（由 transport_params 生成），便于 Controller 展示
         p = tp[0] if tp and isinstance(tp, list) and len(tp) > 0 else {}
-        dest_ip = p.get("destination_ip") or p.get("multicast_ip") or "239.0.0.1"
-        video_port = int(p.get("destination_port", 5004))
-        source_ip = p.get("source_ip", "0.0.0.0")
+        source_ip, dest_ip, video_port = _sender_endpoint_from_transport_leg(p)
         sdp = _make_sdp(sid, source_ip=source_ip, dest_ip=dest_ip, video_port=video_port)
         transport_file = {"data": sdp, "type": "application/sdp"}
         _sender_active[sid] = {
@@ -787,13 +915,9 @@ def patch_sender_staged(sender_id_path):
         if ts_ns is None:
             # 回退为立即激活，保持行为一致
             activation_time = f"{int(time.time() * 1e9)}:0"
-            tp = staged.get("transport_params")
-            if not tp or (isinstance(tp, list) and len(tp) == 0):
-                tp = _default_rtp_sender_transport_params()
+            tp = _normalize_sender_transport_params(staged.get("transport_params"))
             p = tp[0] if tp and isinstance(tp, list) and len(tp) > 0 else {}
-            dest_ip = p.get("destination_ip") or p.get("multicast_ip") or "239.0.0.1"
-            video_port = int(p.get("destination_port", 5004))
-            source_ip = p.get("source_ip", "0.0.0.0")
+            source_ip, dest_ip, video_port = _sender_endpoint_from_transport_leg(p)
             sdp = _make_sdp(sid, source_ip=source_ip, dest_ip=dest_ip, video_port=video_port)
             transport_file = {"data": sdp, "type": "application/sdp"}
             _sender_active[sid] = {
@@ -814,38 +938,46 @@ def patch_sender_staged(sender_id_path):
 @app.route(f"{BASE}/senders/<path:sender_id_path>/active/", methods=["GET"])
 @app.route(f"{BASE}/senders/<path:sender_id_path>/active", methods=["GET"])
 def get_sender_active(sender_id_path):
-    sid = sender_id_path.rstrip("/")
-    if sid != _load_sender_id():
+    sid = _resolve_sender_id(sender_id_path)
+    if not sid:
         return jsonify({"error": "sender not found"}), 404
-    return jsonify(_with_params_alias(_sender_active.get(sid, _default_sender_staged(sid))))
+    # 若 _sender_active 尚未被 activation 写入，则回退到 staged，避免前端认为 sender 未启用。
+    obj = _sender_active.get(sid)
+    if obj is None:
+        obj = _sender_staged.get(sid)
+    if obj is None:
+        obj = _default_sender_staged(sid)
+    obj = dict(obj)
+    if "transport_params" in obj:
+        obj["transport_params"] = _normalize_sender_transport_params(obj.get("transport_params"))
+    return jsonify(_with_params_alias(_with_sender_enable_alias(obj)))
 
 
 @app.route(f"{BASE}/senders/<path:sender_id_path>/transportfile/", methods=["GET"])
 @app.route(f"{BASE}/senders/<path:sender_id_path>/transportfile", methods=["GET"])
 def get_sender_transportfile(sender_id_path):
-    sid = sender_id_path.rstrip("/")
-    if sid != _load_sender_id():
+    sid = _resolve_sender_id(sender_id_path)
+    if not sid:
         return jsonify({"error": "sender not found"}), 404
     # 从 staged/active 取 transport_params 生成 SDP，或使用默认组播
     staged = _sender_staged.get(sid, _default_sender_staged(sid))
     active = _sender_active.get(sid, staged)
     tp = (active or staged).get("transport_params") or []
     if tp and isinstance(tp, list) and len(tp) > 0:
-        p = tp[0]
-        dest_ip = p.get("destination_ip") or p.get("multicast_ip") or "239.0.0.1"
-        video_port = int(p.get("destination_port", 5004))
-        source_ip = p.get("source_ip", "0.0.0.0")
+        source_ip, dest_ip, video_port = _sender_endpoint_from_transport_leg(tp[0])
     else:
-        dest_ip, video_port, source_ip = "239.0.0.1", 5004, "0.0.0.0"
+        source_ip, dest_ip, video_port = "0.0.0.0", "239.0.0.1", 5004
     sdp = _make_sdp(sid, source_ip=source_ip, dest_ip=dest_ip, video_port=video_port)
+    # 当前 Admin 版本在 TRANSPORTFILE 页直接把返回值当文本渲染，返回对象会触发 React child 错误。
+    # 因此这里固定返回原始 SDP 文本。
     return Response(sdp, mimetype="application/sdp")
 
 
 @app.route(f"{BASE}/senders/<path:sender_id_path>/constraints/", methods=["GET"])
 @app.route(f"{BASE}/senders/<path:sender_id_path>/constraints", methods=["GET"])
 def get_sender_constraints(sender_id_path):
-    sid = sender_id_path.rstrip("/")
-    if sid != _load_sender_id():
+    sid = _resolve_sender_id(sender_id_path)
+    if not sid:
         return jsonify({"error": "sender not found"}), 404
     return jsonify(_constraints_response(_sender_rtp_constraints()))
 
@@ -853,10 +985,10 @@ def get_sender_constraints(sender_id_path):
 @app.route(f"{BASE}/senders/<path:sender_id_path>/transporttype/", methods=["GET"])
 @app.route(f"{BASE}/senders/<path:sender_id_path>/transporttype", methods=["GET"])
 def get_sender_transporttype(sender_id_path):
-    sid = sender_id_path.rstrip("/")
-    if sid != _load_sender_id():
+    sid = _resolve_sender_id(sender_id_path)
+    if not sid:
         return jsonify({"error": "sender not found"}), 404
-    return jsonify("urn:x-nmos:transport:rtp.ucast")
+    return jsonify("urn:x-nmos:transport:rtp")
 
 
 if __name__ == "__main__":

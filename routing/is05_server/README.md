@@ -1,6 +1,11 @@
-# IS-05 Connection API 服务端
+# IS-05 Connection API 服务端（app2/app3）
 
 自研节点上的 **IS-05 Connection API** 实现，使 NMOS Controller 的「Sender → Receiver 连接」能驱动 MTL SDK 收流。
+
+当前推荐拆分运行：
+
+- **发送端**：`app2.py`
+- **接收端**：`app3.py`
 
 ## 实现方式
 
@@ -14,21 +19,39 @@
 
 ## 运行
 
-```bash
-# 1) 注册节点并保存配置（与 IS-05 共用 receiver_id）
-export REGISTRY_URL=http://<Easy-NMOS-IP>
-python3 routing/scripts/register_node_example.py --heartbeat --interval 10 \
-  --href http://本机IP:9090/ --save-config .nmos_node.json
+### 发送端（Sender）机器
 
-# 2) 启动 IS-05 服务（默认 0.0.0.0:9090）
+```bash
+# 1) 以 sender 模式注册并保存 sender_id
+export REGISTRY_URL=http://<Easy-NMOS-IP>
+python3 routing/scripts/register_node_example.py --mode sender --heartbeat --interval 10 \
+  --href http://发送端IP:9090/ --save-config .nmos_node.json
+
+# 2) 启动发送端 IS-05（app2）
+python3 routing/is05_server/app2.py
+```
+
+### 接收端（Receiver）机器
+
+```bash
+# 1) 以 receiver 模式注册并保存 receiver_id
+export REGISTRY_URL=http://<Easy-NMOS-IP>
+python3 routing/scripts/register_node_example.py --mode receiver --heartbeat --interval 10 \
+  --href http://接收端IP:9090/ --save-config .nmos_node.json
+
+# 2) 启动接收端 IS-05（app3）
+# 如接收端配置文件不是 .nmos_node.json，可先 export NMOS_NODE_CONFIG=...
 export CONNECTION_STATE_FILE=/path/to/connection_state.json   # 可选，默认 ./connection_state.json
-python3 routing/is05_server/app.py
+python3 routing/is05_server/app3.py
 
 # 3) 启动 C++ 收流 daemon（读取 CONNECTION_STATE_FILE，创建 MTL RX 并编码）
 ./build/is05_receiver_daemon
 ```
 
-Controller 访问 `http://<本机IP>/admin`，对自研 Receiver 执行「连接」后，PATCH 会落到本服务；本服务写 connection_state.json，daemon 检测到变更后创建/更新收流并写 MP4。
+Controller 访问 `http://<Easy-NMOS-IP>/admin`，对 Receiver 执行 CONNECT/STAGE/ACTIVATE 后：
+
+- **接收端 app3.py** 负责写 `connection_state.json`
+- daemon 检测到变更后创建/更新收流并写 MP4
 
 ## API 端点（IS-05 v1.1 single）
 
@@ -47,7 +70,7 @@ Controller 访问 `http://<本机IP>/admin`，对自研 Receiver 执行「连接
 | GET | .../single/senders/{id}/transportfile | SDP 传输文件（TRANSPORT FILE） |
 | GET | .../single/receivers/{id}/constraints | RTP 约束（CONNECT 时参数校验） |
 
-## Receiver 的 ACTIVE / STAGED / CONNECT
+## Receiver 的 ACTIVE / STAGED / CONNECT（app3）
 
 在 Easy-NMOS 的 **Receivers** 界面中，每个 Receiver 支持：
 
@@ -67,7 +90,7 @@ Controller 访问 `http://<本机IP>/admin`，对自研 Receiver 执行「连接
 - Python 3.6+
 - Flask：`pip install flask`（或 `pip install -r requirements.txt`）
 
-## Sender 的 ACTIVE / STAGED 说明
+## Sender 的 ACTIVE / STAGED 说明（app2）
 
 本服务**已实现** Sender 端的 IS-05 ACTIVE 与 STAGED：
 
@@ -78,12 +101,33 @@ Controller 访问 `http://<本机IP>/admin`，对自研 Receiver 执行「连接
 若在 Controller（如 Easy-NMOS）里看不到 Sender 的 ACTIVE/STAGED 入口：
 
 1. 确认节点是以 **Sender** 身份注册：`--mode sender` 或 `--mode both`，且 `--save-config .nmos_node.json`，这样 Registry 与节点上都有 sender_id。
-2. 在该节点机器上运行 `python3 routing/is05_server/app.py`，且能读到 `sender_id`（通过 `.nmos_node.json` 或环境变量 `IS05_SENDER_ID`）。
+2. 在发送端机器上运行 `python3 routing/is05_server/app2.py`，且能读到 `sender_id`（通过 `.nmos_node.json` 或环境变量 `IS05_SENDER_ID`）。
 3. 确认 Controller 能访问该节点的 `.../x-nmos/connection/v1.1/single/senders` 与 `.../senders/{id}`；GET `.../senders/{id}` 会返回 `["staged/", "active/", "constraints/", "transportfile/", "transporttype/"]`，Controller 据此展示 STAGED、ACTIVE、TRANSPORT FILE 等。
 
 ## 出现 "no api found" 或 Sender/Receiver 无 ACTIVE/TRANSPORT FILE/CONNECT 时
 
 1. **节点根与 Node API**：部分 Controller（如 Easy-NMOS）会先请求节点根 `GET http://<node>:port/`，期望得到 IS-04 Node API base 数组 `["self/", "sources/", "flows/", "devices/", "senders/", "receivers/"]`，并可能继续请求 `/self/`、`/devices/` 等。本服务已实现这些桩路由，返回 200 与最小合法 JSON，避免因 404 导致 "no api found"。请确保 **`--save-config` 写入的 `.nmos_node.json` 含有 `node_id`、`device_id`**（注册脚本已自动写入）。
-2. **Sender/Receiver 机器必须运行本 IS-05 服务**：在对应机器上执行 `python3 routing/is05_server/app.py`，且 `.nmos_node.json` 中有对应的 `sender_id` 或 `receiver_id`（用 `--mode sender` 或 `--mode receiver` 并 `--save-config` 注册一次即可）。
+2. **Sender/Receiver 机器必须运行对应 IS-05 服务**：
+   - 发送端运行 `python3 routing/is05_server/app2.py`
+   - 接收端运行 `python3 routing/is05_server/app3.py`
+   且 `.nmos_node.json` 中有对应的 `sender_id` 或 `receiver_id`（用 `--mode sender` 或 `--mode receiver` 并 `--save-config` 注册一次即可）。
 3. **Connection API 基路径**：Controller 会请求 `GET http://<node>:port/x-nmos/connection/v1.1/`，本服务已实现并返回 `["bulk/", "single/"]`，否则会 404 导致不显示按钮。
 4. **跨域**：若 admin 在浏览器中从 Easy-NMOS 主机（如 192.168.1.200）打开，浏览器会跨域请求节点地址，本服务已加 CORS 头。若仍被拦截，请确认防火墙放行对应端口，且从 admin 所在机器能访问节点根与 `.../x-nmos/connection/v1.1/`。
+
+## 已知前端兼容点（Easy-NMOS/Admin）
+
+1. **TRANSPORTFILE 页面 React 报错（object 不能渲染）**
+   - 现象：`Objects are not valid as a React child (found: object with keys {data, type})`
+   - 原因：部分 Admin 页面把 transportfile 返回值当纯文本渲染。
+   - 处理：`app2.py` 的 `.../senders/{id}/transportfile` 固定返回原始 SDP 文本（`application/sdp`）。
+
+2. **CONNECT / STAGE 中 params.forEach 报错**
+   - 现象：`TypeError: can't access property "forEach", params is undefined`
+   - 原因：不同前端版本对 IS-05 字段名兼容差异（`params` vs `transport_params`）。
+   - 处理：服务端返回中增加别名兼容：
+     - `constraints` 同时返回 `params` 与 `constraints`
+     - `staged/active` 同时返回 `transport_params` 与 `params`
+
+3. **Sender 页面显示 Transport Parameters: Unknown Type**
+   - 说明：通常是前端对 transport 参数键名/内容识别有限导致的展示问题，不影响连接流程。
+   - 建议：优先确认 `CONNECT/STAGE/ACTIVATE` 正常，以及接收端 `connection_state.json` 已按预期更新。
