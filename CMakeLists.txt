@@ -112,5 +112,9 @@ target_link_libraries(av_txrx_demo PRIVATE mtl_sdk encode_sdk)
 add_executable(is05_receiver_daemon samples/is05_receiver_daemon.cpp)
 target_link_libraries(is05_receiver_daemon PRIVATE mtl_sdk encode_sdk frame_transport)
 
+# IS-05 receiver-only daemon: reads connection_state.json, creates MTL RX only
+add_executable(is05_receiver_only_daemon samples/is05_receiver_only_daemon.cpp)
+target_link_libraries(is05_receiver_only_daemon PRIVATE mtl_sdk frame_transport frame_store encode_sdk)
+
 # ---- tests ----
 add_subdirectory(tests)

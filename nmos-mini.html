@@ -1,0 +1,269 @@
+# python3 -m http.server 8088
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>NMOS Mini Router UI</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 16px; }
+    .row { display: flex; gap: 16px; }
+    .panel { flex: 1; border: 1px solid #ddd; border-radius: 8px; padding: 12px; }
+    .item { padding: 8px; border: 1px solid #eee; border-radius: 6px; margin-bottom: 8px; cursor: pointer; }
+    .item.selected { border-color: #4caf50; background: #f1fff1; }
+    .meta { color: #666; font-size: 12px; margin-top: 4px; }
+    button { margin-right: 8px; }
+    .ok { color: #0a7; }
+    .err { color: #c33; }
+  </style>
+</head>
+<body>
+  <h2>NMOS 最小路由页面（列表版）</h2>
+
+  <div style="margin-bottom:12px;">
+    Query API:
+    <input id="queryBase" style="width:420px;" value="http://192.168.1.200/x-nmos/query/v1.3" />
+    <button id="btnRefresh">刷新列表</button>
+  </div>
+
+  <div class="row">
+    <div class="panel">
+      <h3>Senders</h3>
+      <div id="senders"></div>
+    </div>
+    <div class="panel">
+      <h3>Receivers</h3>
+      <div id="receivers"></div>
+    </div>
+  </div>
+
+  <h3>日志</h3>
+  <pre id="log" style="background:#fafafa;border:1px solid #eee;padding:10px;min-height:120px;"></pre>
+
+  <script>
+    const state = {
+      senders: [],
+      receivers: [],
+      selectedSenderId: null,
+      timer: null,
+    };
+
+    function log(msg, isErr = false) {
+      const el = document.getElementById("log");
+      const line = `[${new Date().toLocaleTimeString()}] ${msg}\n`;
+      el.innerHTML += isErr ? `<span class="err">${line}</span>` : `<span class="ok">${line}</span>`;
+      el.scrollTop = el.scrollHeight;
+    }
+
+    function getQueryBase() {
+      return document.getElementById("queryBase").value.trim().replace(/\/$/, "");
+    }
+
+    async function getJson(url, errPrefix) {
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`${errPrefix}: ${res.status}`);
+      return await res.json();
+    }
+
+    // 从 sender/receiver 资源推导节点基地址：
+    // 1) 直接用 href
+    // 2) 无 href 时，通过 device_id -> devices/{id} -> node_id -> nodes/{id}.href 反查
+    async function inferNodeBase(resource) {
+      if (resource._nodeBase) return resource._nodeBase;
+      if (resource.href) {
+        resource._nodeBase = resource.href.replace(/\/$/, "");
+        return resource._nodeBase;
+      }
+      if (!resource.device_id) {
+        throw new Error(`资源 ${resource.id} 缺少 href/device_id，无法推导节点地址`);
+      }
+
+      const queryBase = getQueryBase();
+      const dev = await getJson(
+        `${queryBase}/devices/${resource.device_id}`,
+        `获取 device 失败(${resource.device_id})`
+      );
+      const nodeId = dev.node_id;
+      if (!nodeId) {
+        throw new Error(`device ${resource.device_id} 缺少 node_id`);
+      }
+
+      const node = await getJson(
+        `${queryBase}/nodes/${nodeId}`,
+        `获取 node 失败(${nodeId})`
+      );
+      if (!node.href) {
+        throw new Error(`node ${nodeId} 缺少 href`);
+      }
+
+      resource._nodeBase = node.href.replace(/\/$/, "");
+      return resource._nodeBase;
+    }
+
+    // ---------- 4个API函数 ----------
+    async function listSenders() {
+      const url = `${getQueryBase()}/senders`;
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`listSenders失败: ${res.status}`);
+      return await res.json();
+    }
+
+    async function listReceivers() {
+      const url = `${getQueryBase()}/receivers`;
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`listReceivers失败: ${res.status}`);
+      return await res.json();
+    }
+
+    async function connect(senderId, receiverId) {
+      const sender = state.senders.find(s => s.id === senderId);
+      const receiver = state.receivers.find(r => r.id === receiverId);
+      if (!sender || !receiver) throw new Error("sender/receiver 不存在");
+
+      const senderNode = await inferNodeBase(sender);
+      const receiverNode = await inferNodeBase(receiver);
+
+      // 1) 取 transportfile
+      const tfUrl = `${senderNode}/x-nmos/connection/v1.1/single/senders/${senderId}/transportfile`;
+      const tfRes = await fetch(tfUrl);
+      if (!tfRes.ok) throw new Error(`transportfile失败: ${tfRes.status}`);
+      const sdpText = await tfRes.text();
+      if (!sdpText || !sdpText.trim()) throw new Error("transportfile为空");
+
+      // 2) PATCH receiver staged
+      const patchUrl = `${receiverNode}/x-nmos/connection/v1.1/single/receivers/${receiverId}/staged`;
+      const body = {
+        sender_id: senderId,
+        master_enable: true,
+        activation: { mode: "activate_immediate" },
+        transport_file: { type: "application/sdp", data: sdpText }
+      };
+
+      const patchRes = await fetch(patchUrl, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!patchRes.ok) throw new Error(`PATCH staged失败: ${patchRes.status}`);
+      return await patchRes.json();
+    }
+
+    async function disconnect(receiverId) {
+      const receiver = state.receivers.find(r => r.id === receiverId);
+      if (!receiver) throw new Error("receiver 不存在");
+
+      const receiverNode = await inferNodeBase(receiver);
+      const patchUrl = `${receiverNode}/x-nmos/connection/v1.1/single/receivers/${receiverId}/staged`;
+      const body = {
+        master_enable: false,
+        sender_id: null,
+        activation: { mode: "activate_immediate" }
+      };
+
+      const patchRes = await fetch(patchUrl, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!patchRes.ok) throw new Error(`disconnect失败: ${patchRes.status}`);
+      return await patchRes.json();
+    }
+    // ---------- API函数结束 ----------
+
+    async function getReceiverActive(receiver) {
+      try {
+        const base = await inferNodeBase(receiver);
+        const url = `${base}/x-nmos/connection/v1.1/single/receivers/${receiver.id}/active`;
+        const res = await fetch(url);
+        if (!res.ok) return null;
+        return await res.json();
+      } catch {
+        return null;
+      }
+    }
+
+    function render() {
+      const senderBox = document.getElementById("senders");
+      const receiverBox = document.getElementById("receivers");
+      senderBox.innerHTML = "";
+      receiverBox.innerHTML = "";
+
+      state.senders.forEach(s => {
+        const div = document.createElement("div");
+        div.className = "item" + (state.selectedSenderId === s.id ? " selected" : "");
+        div.innerHTML = `<b>${s.label || "Unnamed Sender"}</b><div class="meta">${s.id}</div>`;
+        div.onclick = () => {
+          // 点击已选中的 sender 时，切换为取消选中
+          state.selectedSenderId = state.selectedSenderId === s.id ? null : s.id;
+          render();
+        };
+        senderBox.appendChild(div);
+      });
+
+      state.receivers.forEach(r => {
+        const div = document.createElement("div");
+        div.className = "item";
+        const activeSender = r._active?.sender_id || "null";
+        div.innerHTML = `
+          <b>${r.label || "Unnamed Receiver"}</b>
+          <div class="meta">${r.id}</div>
+          <div class="meta">active.sender_id: ${activeSender}</div>
+          <div style="margin-top:8px;">
+            <button data-action="connect">连接到已选 Sender</button>
+            <button data-action="disconnect">断开</button>
+          </div>
+        `;
+        div.querySelector('[data-action="connect"]').onclick = async (e) => {
+          e.stopPropagation();
+          try {
+            if (!state.selectedSenderId) throw new Error("请先在左侧选择 Sender");
+            await connect(state.selectedSenderId, r.id);
+            log(`连接成功: ${state.selectedSenderId} -> ${r.id}`);
+            await refreshActiveOnly();
+            render();
+          } catch (err) {
+            log(`连接失败: ${err.message}`, true);
+          }
+        };
+        div.querySelector('[data-action="disconnect"]').onclick = async (e) => {
+          e.stopPropagation();
+          try {
+            await disconnect(r.id);
+            log(`断开成功: receiver=${r.id}`);
+            await refreshActiveOnly();
+            render();
+          } catch (err) {
+            log(`断开失败: ${err.message}`, true);
+          }
+        };
+        receiverBox.appendChild(div);
+      });
+    }
+
+    async function refreshActiveOnly() {
+      await Promise.all(state.receivers.map(async (r) => {
+        r._active = await getReceiverActive(r);
+      }));
+    }
+
+    async function refreshAll() {
+      try {
+        state.senders = await listSenders();
+        state.receivers = await listReceivers();
+        await refreshActiveOnly();
+        render();
+        log(`刷新完成: senders=${state.senders.length}, receivers=${state.receivers.length}`);
+      } catch (err) {
+        log(`刷新失败: ${err.message}`, true);
+      }
+    }
+
+    document.getElementById("btnRefresh").onclick = refreshAll;
+    refreshAll();
+    state.timer = setInterval(async () => {
+      await refreshActiveOnly();
+      render();
+    }, 8000);
+  </script>
+</body>
+</html>

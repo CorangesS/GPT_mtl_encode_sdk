@@ -1,0 +1,16 @@
+{
+  "format_version": 1,
+  "session_id": "is05_receiver_only",
+  "pix_fmt": "YUV422_10BIT",
+  "width": 1920,
+  "height": 1080,
+  "fps": 59.940,
+  "num_planes": 3,
+  "linesize_y": 3840,
+  "linesize_uv": 1920,
+  "size_y": 4147200,
+  "size_u": 2073600,
+  "size_v": 2073600,
+  "bytes_per_frame": 8294400,
+  "frames_written": 1775
+}

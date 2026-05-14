@@ -22,13 +22,15 @@
 
 ## 二、NMOS 概念与界面元素的映射
 
-| 界面概念 | NMOS 资源 | 说明 |
-|----------|-----------|------|
-| 发送节点 | `Sender`（IS-04） | 在 Registry Query 中列出；每个 Sender 有 `id`、`label`、`href`（指向节点 Connection API 等）。 |
-| 接收节点 | `Receiver`（IS-04） | 同上；连接操作主要针对 **Receiver** 的 staged/active。 |
-| 一条连线 | Sender ↔ Receiver 连接 | 实现上 = 对 **Receiver** 的 `.../single/receivers/{id}/staged` 做 **PATCH**，填入 `sender_id`，并从 **Sender** 侧取 **transportfile（SDP）** 写入 `transport_file`（或等价 `transport_params`），`activation.mode` 常为 `activate_immediate`。 |
-| 当前是否已连接 | Receiver **active** | `GET .../receivers/{id}/active` 可得到当前 `sender_id`、传输参数等，用于画布上高亮或同步连线。 |
-| 断开 | 再次 PATCH staged | 例如 `master_enable: false` 或清空 `sender_id`（以实现为准），并激活；本仓库 IS-05 行为见 `routing/is05_server/README.md`。 |
+
+| 界面概念    | NMOS 资源              | 说明                                                                                                                                                                                                                  |
+| ------- | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 发送节点    | `Sender`（IS-04）      | 在 Registry Query 中列出；每个 Sender 有 `id`、`label`、`href`（指向节点 Connection API 等）。                                                                                                                                        |
+| 接收节点    | `Receiver`（IS-04）    | 同上；连接操作主要针对 **Receiver** 的 staged/active。                                                                                                                                                                           |
+| 一条连线    | Sender ↔ Receiver 连接 | 实现上 = 对 **Receiver** 的 `.../single/receivers/{id}/staged` 做 **PATCH**，填入 `sender_id`，并从 **Sender** 侧取 **transportfile（SDP）** 写入 `transport_file`（或等价 `transport_params`），`activation.mode` 常为 `activate_immediate`。 |
+| 当前是否已连接 | Receiver **active**  | `GET .../receivers/{id}/active` 可得到当前 `sender_id`、传输参数等，用于画布上高亮或同步连线。                                                                                                                                               |
+| 断开      | 再次 PATCH staged      | 例如 `master_enable: false` 或清空 `sender_id`（以实现为准），并激活；本仓库 IS-05 行为见 `routing/is05_server/README.md`。                                                                                                                 |
+
 
 **要点**：NMOS 里「连接」是 **Receiver 订阅某个 Sender**；画布上 **有向边** 建议画成 **Sender → Receiver**，与媒体流方向一致。
 
@@ -75,92 +77,82 @@ Easy-NMOS `/admin` 中对接收端执行 **CONNECT** 时，典型步骤为：
 
 ### 阶段 A：环境与数据准备
 
-1. **部署 Registry + Controller**  
-   - 使用 **Easy-NMOS**（推荐），保证 `http://<Easy-NMOS-IP>/admin` 可访问。  
-   - 文档：`docs/需求3_路由管理部署与使用.md`。
-
-2. **注册发送端 / 接收端节点**  
-   - 使用 `routing/scripts/register_node_example.py`，`--mode sender` / `receiver` / `both`，`--href` 为 **浏览器可达** 的节点 IS-05 根 URL（含端口），`--save-config .nmos_node.json`。  
-   - 接收端需运行 `python3 routing/is05_server/app.py`，与 `--href` 端口一致。
-
-3. **确认在 `/admin` 中能完成一次手动 CONNECT**  
-   - 若此处失败，应先按 `routing/is05_server/README.md` 排查（节点根、`/x-nmos/connection/v1.1/`、CORS 等），再开发自定义 UI。
+1. **部署 Registry + Controller**
+  - 使用 **Easy-NMOS**（推荐），保证 `http://<Easy-NMOS-IP>/admin` 可访问。  
+  - 文档：`docs/需求3_路由管理部署与使用.md`。
+2. **注册发送端 / 接收端节点**
+  - 使用 `routing/scripts/register_node_example.py`，`--mode sender` / `receiver` / `both`，`--href` 为 **浏览器可达** 的节点 IS-05 根 URL（含端口），`--save-config .nmos_node.json`。  
+  - 接收端需运行 `python3 routing/is05_server/app.py`，与 `--href` 端口一致。
+3. **确认在 `/admin` 中能完成一次手动 CONNECT**
+  - 若此处失败，应先按 `routing/is05_server/README.md` 排查（节点根、`/x-nmos/connection/v1.1/`、CORS 等），再开发自定义 UI。
 
 ### 阶段 B：发现 — 拉取 Senders / Receivers 列表
 
-1. **确定 Registry 的 Query API 基地址**  
-   - 不同发行版路径可能为 `/x-nmos/query/v2.0/` 或经 Controller 转发；可从 Easy-NMOS 文档或实际 `GET` Registry 根响应中确认。
-
-2. **请求示例（概念）**  
-   - `GET {query_base}/senders`  
-   - `GET {query_base}/receivers`  
-   - 返回 JSON 数组，元素含 `id`、`label`、`href`（或可从 `href` 推导节点基础 URL）。
-
-3. **在画布上创建节点**  
-   - 每个 `sender.id` → 一个发送节点；每个 `receiver.id` → 一个接收节点。  
-   - 节点上展示 `label` 或 `id` 短码；可折叠按 `device_id` / `node` 分组（需额外 `GET devices` / `nodes`）。
-
-4. **刷新策略**  
-   - 定时轮询（如 5–10 s）刷新列表，或仅在用户点击「刷新」时拉取，避免过载。
+1. **确定 Registry 的 Query API 基地址**
+  - 不同发行版路径可能为 `/x-nmos/query/v2.0/` 或经 Controller 转发；可从 Easy-NMOS 文档或实际 `GET` Registry 根响应中确认。
+2. **请求示例（概念）**
+  - `GET {query_base}/senders`  
+  - `GET {query_base}/receivers`  
+  - 返回 JSON 数组，元素含 `id`、`label`、`href`（或可从 `href` 推导节点基础 URL）。
+3. **在画布上创建节点**
+  - 每个 `sender.id` → 一个发送节点；每个 `receiver.id` → 一个接收节点。  
+  - 节点上展示 `label` 或 `id` 短码；可折叠按 `device_id` / `node` 分组（需额外 `GET devices` / `nodes`）。
+4. **刷新策略**
+  - 定时轮询（如 5–10 s）刷新列表，或仅在用户点击「刷新」时拉取，避免过载。
 
 ### 阶段 C：连接 — 将「一条边」转为 IS-05 PATCH
 
 以下为实现 **单次连接** 的推荐顺序（与 Controller 逻辑一致）：
 
-1. **解析 Sender 节点基础 URL**  
-   - 从 Query 返回的 Sender 资源中得到 `href`，截取到节点根或 Connection API 前缀（依字段格式而定）。
-
-2. **获取 SDP**  
-   - `GET {sender_node}/x-nmos/connection/v1.1/single/senders/{sender_id}/transportfile`  
-   - 响应可能是 JSON（含 `data`、`type`）或纯 SDP；需与 `is05_server` 返回格式一致地解析。
-
-3. **构造 PATCH body**  
-   - 目标：`PATCH {receiver_node}/x-nmos/connection/v1.1/single/receivers/{receiver_id}/staged`  
-   - Body 通常包含：  
-     - `sender_id`  
-     - `transport_file`：`{ "type": "application/sdp", "data": "<SDP字符串>" }`（以实际 API 为准）  
-     - `master_enable`: `true`  
-     - `activation`: `{ "mode": "activate_immediate" }`  
-
-4. **发送 PATCH**  
-   - 成功则 Receiver **active** 更新，自研节点侧将连接写入 `connection_state.json`（见 `routing/is05_server`）。
-
-5. **错误处理**  
-   - HTTP 4xx/5xx、SDP 为空、constraints 不满足时，在画布上提示并撤销「待连接」边。
+1. **解析 Sender 节点基础 URL**
+  - 从 Query 返回的 Sender 资源中得到 `href`，截取到节点根或 Connection API 前缀（依字段格式而定）。
+2. **获取 SDP**
+  - `GET {sender_node}/x-nmos/connection/v1.1/single/senders/{sender_id}/transportfile`  
+  - 响应可能是 JSON（含 `data`、`type`）或纯 SDP；需与 `is05_server` 返回格式一致地解析。
+3. **构造 PATCH body**
+  - 目标：`PATCH {receiver_node}/x-nmos/connection/v1.1/single/receivers/{receiver_id}/staged`  
+  - Body 通常包含：  
+    - `sender_id`  
+    - `transport_file`：`{ "type": "application/sdp", "data": "<SDP字符串>" }`（以实际 API 为准）  
+    - `master_enable`: `true`  
+    - `activation`: `{ "mode": "activate_immediate" }`
+4. **发送 PATCH**
+  - 成功则 Receiver **active** 更新，自研节点侧将连接写入 `connection_state.json`（见 `routing/is05_server`）。
+5. **错误处理**
+  - HTTP 4xx/5xx、SDP 为空、constraints 不满足时，在画布上提示并撤销「待连接」边。
 
 ### 阶段 D：画布交互设计
 
-1. **交互模式（二选一或并存）**  
-   - **ComfyUI 式**：从 Sender 右侧端口拖到 Receiver 左侧端口，松开创建边。  
-   - **两次点击式**：第一次点击选中 Sender，第二次点击 Receiver，确认后创建边并触发阶段 C。
-
-2. **多连接与约束**  
-   - 同一 **Receiver** 在某一时刻通常只有一条 **active** 到某 **Sender**；若用户拖第二条边，策略可以是：覆盖前一条，或先提示断开。  
-   - 同一 **Sender** 可被多个 **Receiver** 连接（组播场景常见），需以设备与网络能力为准。
-
-3. **视觉状态**  
-   - **已连接**：根据 `GET .../receivers/{id}/active` 中的 `sender_id` 高亮对应边。  
-   - **连接中 / 失败**：边上显示 loading 或错误色。
+1. **交互模式（二选一或并存）**
+  - **ComfyUI 式**：从 Sender 右侧端口拖到 Receiver 左侧端口，松开创建边。  
+  - **两次点击式**：第一次点击选中 Sender，第二次点击 Receiver，确认后创建边并触发阶段 C。
+2. **多连接与约束**
+  - 同一 **Receiver** 在某一时刻通常只有一条 **active** 到某 **Sender**；若用户拖第二条边，策略可以是：覆盖前一条，或先提示断开。  
+  - 同一 **Sender** 可被多个 **Receiver** 连接（组播场景常见），需以设备与网络能力为准。
+3. **视觉状态**
+  - **已连接**：根据 `GET .../receivers/{id}/active` 中的 `sender_id` 高亮对应边。  
+  - **连接中 / 失败**：边上显示 loading 或错误色。
 
 ### 阶段 E：断开与同步
 
-1. **断开**  
-   - 对 `.../receivers/{id}/staged` 发 PATCH，将连接清空或 `master_enable: false`，并 `activate_immediate`（具体字段以 IS-05 与本实现为准）。  
-   - 实现细节可参考 `docs/需求16-18_具体实现拆解与routing现状.md` 中「断开」一节。
-
-2. **定期同步 active**  
-   - 轮询各可见 Receiver 的 `active`，刷新画布边状态，避免与 `/admin` 或其他客户端操作冲突。
+1. **断开**
+  - 对 `.../receivers/{id}/staged` 发 PATCH，将连接清空或 `master_enable: false`，并 `activate_immediate`（具体字段以 IS-05 与本实现为准）。  
+  - 实现细节可参考 `docs/需求16-18_具体实现拆解与routing现状.md` 中「断开」一节。
+2. **定期同步 active**
+  - 轮询各可见 Receiver 的 `active`，刷新画布边状态，避免与 `/admin` 或其他客户端操作冲突。
 
 ---
 
 ## 五、技术选型建议
 
-| 层次 | 选项 | 说明 |
-|------|------|------|
-| 画布 / 节点编辑器 | [React Flow](https://reactflow.dev/)（@xyflow/react）、Vue Flow、LiteGraph.js | 负责节点、边、缩放平移、自定义端口；不负责 NMOS。 |
-| 运行时 | React / Vue / Svelte 等 | 与团队栈一致即可。 |
-| HTTP | `fetch` / axios | 调用 Query API 与节点 IS-05。 |
-| 可选 BFF | 本仓库 small Flask/FastAPI 或 Nginx 反代 | 浏览器直连多节点 IS-05 时需处理 **CORS**；若统一走同域后端转发，可简化浏览器配置与密钥管理。 |
+
+| 层次         | 选项                                                                        | 说明                                                     |
+| ---------- | ------------------------------------------------------------------------- | ------------------------------------------------------ |
+| 画布 / 节点编辑器 | [React Flow](https://reactflow.dev/)（@xyflow/react）、Vue Flow、LiteGraph.js | 负责节点、边、缩放平移、自定义端口；不负责 NMOS。                            |
+| 运行时        | React / Vue / Svelte 等                                                    | 与团队栈一致即可。                                              |
+| HTTP       | `fetch` / axios                                                           | 调用 Query API 与节点 IS-05。                                |
+| 可选 BFF     | 本仓库 small Flask/FastAPI 或 Nginx 反代                                        | 浏览器直连多节点 IS-05 时需处理 **CORS**；若统一走同域后端转发，可简化浏览器配置与密钥管理。 |
+
 
 ---
 
@@ -174,11 +166,13 @@ Easy-NMOS `/admin` 中对接收端执行 **CONNECT** 时，典型步骤为：
 
 ## 七、与 nmos-js / Easy-NMOS 的关系
 
-| 问题 | 建议 |
-|------|------|
-| 是否必须改 nmos-js？ | **否**。nmos-js 是独立仓库的参考 UI；实现 ComfyUI 式界面不必 fork。 |
+
+| 问题                           | 建议                                                                             |
+| ---------------------------- | ------------------------------------------------------------------------------ |
+| 是否必须改 nmos-js？               | **否**。nmos-js 是独立仓库的参考 UI；实现 ComfyUI 式界面不必 fork。                               |
 | Easy-NMOS 只有一个 `/admin` 怎么办？ | 可 **并行** 部署你的静态站点（或同机另一路径 / 另一端口），共用同一 Registry 与节点；用户从「节点图」或「经典 admin」二选一或混用。 |
-| 能否把页面嵌进 Easy-NMOS？ | 若 Easy-NMOS 支持自定义静态资源或反向代理，可将构建后的 SPA 挂到子路径；属部署集成问题，仍无需改 nmos-js 源码。 |
+| 能否把页面嵌进 Easy-NMOS？           | 若 Easy-NMOS 支持自定义静态资源或反向代理，可将构建后的 SPA 挂到子路径；属部署集成问题，仍无需改 nmos-js 源码。           |
+
 
 本仓库 `routing/README.md` 已明确：**路由对接可在不修改 NMOS-JS 的前提下完成**；节点图界面属于同一思路的 **新控制面**。
 
@@ -194,24 +188,26 @@ Easy-NMOS `/admin` 中对接收端执行 **CONNECT** 时，典型步骤为：
 
 ## 九、测试检查清单
 
-- [ ] Query 能列出与 `/admin` 一致的 Senders/Receivers。  
-- [ ] 对某 Receiver 从画布发起连接后，`GET .../active` 中 `sender_id` 正确。  
-- [ ] `connection_state.json` 更新，收流 daemon 或 `st2110_record` 行为符合预期。  
-- [ ] 在 `/admin` 手动改连接后，画布轮询能反映新状态（或手动刷新一致）。  
-- [ ] 断开连接后 active 清空，底层停流。  
-- [ ] 双机、跨网段、防火墙场景下浏览器无 CORS/网络错误。
+- Query 能列出与 `/admin` 一致的 Senders/Receivers。  
+- 对某 Receiver 从画布发起连接后，`GET .../active` 中 `sender_id` 正确。  
+- `connection_state.json` 更新，收流 daemon 或 `st2110_record` 行为符合预期。  
+- 在 `/admin` 手动改连接后，画布轮询能反映新状态（或手动刷新一致）。  
+- 断开连接后 active 清空，底层停流。  
+- 双机、跨网段、防火墙场景下浏览器无 CORS/网络错误。
 
 ---
 
 ## 十、相关文档索引（本仓库）
 
-| 文档 | 内容 |
-|------|------|
-| `routing/README.md` | 路由模块总览、Easy-NMOS 与 nmos-js 关系 |
-| `routing/is05_server/README.md` | IS-05 端点、CONNECT 流程、CORS、排查 |
-| `docs/需求3_路由管理部署与使用.md` | Easy-NMOS 部署与双机角色 |
+
+| 文档                                 | 内容                            |
+| ---------------------------------- | ----------------------------- |
+| `routing/README.md`                | 路由模块总览、Easy-NMOS 与 nmos-js 关系 |
+| `routing/is05_server/README.md`    | IS-05 端点、CONNECT 流程、CORS、排查   |
+| `docs/需求3_路由管理部署与使用.md`            | Easy-NMOS 部署与双机角色             |
 | `docs/需求16-18_具体实现拆解与routing现状.md` | IS-04/IS-05 需求级拆解与 routing 现状 |
-| `docs/双机路由管理配置-本机发送第二台接收.md` | 双机场景示例 |
+| `docs/双机路由管理配置-本机发送第二台接收.md`       | 双机场景示例                        |
+
 
 ---
 
@@ -224,3 +220,18 @@ Easy-NMOS `/admin` 中对接收端执行 **CONNECT** 时，典型步骤为：
 ---
 
 *文档版本：与仓库 `GPT_mtl_encode_sdk` 路由说明一致；NMOS Query 路径以实际 Registry/Controller 版本为准。*
+
+
+
+用一个本地静态服务打开（避免部分浏览器策略问题）：
+
+cd /home/dd/GPT_mtl_encode_sdk/ui-stage-d-min
+
+python3 -m http.server 8088
+
+然后浏览器访问：
+
+- [http://localhost:8088/nmos-stage-d-min.html](http://localhost:8088/nmos-stage-d-min.html)
+
+
+

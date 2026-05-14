@@ -11,6 +11,8 @@
 #include <fstream>
 #include <thread>
 #include <chrono>
+#include <cstdint>
+#include <limits>
 
 static void usage(const char* prog) {
   std::cerr << "Usage: " << prog << " [options]\n"
@@ -24,7 +26,8 @@ static void usage(const char* prog) {
             << "  --width <w>              Default: 1920\n"
             << "  --height <h>             Default: 1080\n"
             << "  --fps <fps>              Default: 59.94\n"
-            << "  --duration <sec>         Run for N seconds (default: 10)\n"
+            << "  --duration <sec>         Run for N seconds (default: 10). With --loop and --url, 0 = send until Ctrl+C\n"
+            << "  --loop                   With --url: rewind YUV at EOF and continue (for full --duration or infinite)\n"
             << "  --no-ptp                 Disable PTP, use synthetic timestamps (fallback when NIC lacks PTP)\n"
             << "  --sdp-out <file>         Export SDP describing the video/audio streams to <file>\n"
             << "  --lcores <list>          DPDK lcores for MTL, e.g. 0-3 or 2,3,4,5 (faster TX)\n"
@@ -69,6 +72,7 @@ int main(int argc, char** argv) {
   int height = 1080;
   double fps = 59.94;
   int duration_sec = 10;
+  bool loop_file = false;
   bool use_ptp = true;
   std::string lcores;
   int main_lcore = -1;
@@ -90,6 +94,7 @@ int main(int argc, char** argv) {
     if (a == "--height" && i + 1 < argc) { height = atoi(argv[++i]); continue; }
     if (a == "--fps" && i + 1 < argc) { fps = atof(argv[++i]); continue; }
     if (a == "--duration" && i + 1 < argc) { duration_sec = atoi(argv[++i]); continue; }
+    if (a == "--loop") { loop_file = true; continue; }
     if (a == "--no-ptp") { use_ptp = false; continue; }
     if (a == "--sdp-out" && i + 1 < argc) { sdp_out = argv[++i]; continue; }
     if (a == "--lcores" && i + 1 < argc) { lcores = argv[++i]; continue; }
@@ -205,12 +210,21 @@ int main(int argc, char** argv) {
               << ", " << fmt_str << ")\n";
   }
 
-  const int total_video_frames = (int)(fps * duration_sec);
+  const bool infinite_run = (loop_file && from_file && duration_sec <= 0);
+  if (loop_file && !from_file) {
+    std::cerr << "Warning: --loop has no effect without --url\n";
+  }
+  const int64_t max_video_frames =
+      infinite_run ? (std::numeric_limits<int64_t>::max() / 8)
+                   : std::max<int64_t>(0, (int64_t)std::llround(fps * (double)duration_sec));
   const int samples_per_audio_chunk = 480;
   const int audio_chunk_bytes = samples_per_audio_chunk * 2 * 2;
   std::vector<uint8_t> pcm_chunk(audio_chunk_bytes);
   int audio_chunks_sent = 0;
-  int audio_chunks_total = (int)(48000 * duration_sec / samples_per_audio_chunk);
+  const int audio_chunks_total =
+      (a_tx && !infinite_run && duration_sec > 0)
+          ? (int)(48000 * (int64_t)duration_sec / samples_per_audio_chunk)
+          : 0;
 
   mtl_sdk::VideoFrame frame;
   frame.fmt = vf;
@@ -241,11 +255,15 @@ int main(int argc, char** argv) {
     }
   }
 
-  // Prefill: push first prefill_frames without pacing to fill TX ring (reduces early build timeout)
-  const int prefill = std::min(prefill_frames, total_video_frames);
-  for (int i = 0; i < prefill; i++) {
-    frame.timestamp_ns = ptp_valid ? ctx->now_ptp_ns() : (int64_t)i * frame_ns;
-    if (from_file) {
+  auto load_yuv_frame = [&](int64_t frame_index) -> bool {
+    if (!from_file) {
+      for (size_t j = 0; j < y_sz; j += 2)
+        *(uint16_t*)(y_buf.data() + j) = (uint16_t)(((j / 2 + frame_index) % 1024) << 6);
+      std::fill(u_buf.begin(), u_buf.end(), 0);
+      std::fill(v_buf.begin(), v_buf.end(), 0);
+      return true;
+    }
+    while (true) {
       if (use_yuv420) {
         const size_t y_read = y_sz;
         const size_t u420_sz = (size_t)(width / 2) * (height / 2) * 2;
@@ -254,58 +272,53 @@ int main(int argc, char** argv) {
         yuv_file.read((char*)y_buf.data(), y_read);
         yuv_file.read((char*)u420.data(), u420_sz);
         yuv_file.read((char*)v420.data(), v420_sz);
-        if (!yuv_file || (size_t)yuv_file.gcount() < v420_sz) break;
-        yuv420p10le_to_yuv422p10le(width, height,
-            y_buf.data(), u420.data(), v420.data(),
-            y_buf.data(), u_buf.data(), v_buf.data());
-      } else {
-        yuv_file.read((char*)y_buf.data(), y_sz);
-        yuv_file.read((char*)u_buf.data(), uv_sz);
-        yuv_file.read((char*)v_buf.data(), uv_sz);
-        if (!yuv_file) break;
+        if (yuv_file && (size_t)yuv_file.gcount() >= v420_sz) {
+          yuv420p10le_to_yuv422p10le(width, height, y_buf.data(), u420.data(), v420.data(), y_buf.data(), u_buf.data(),
+                                     v_buf.data());
+          return true;
+        }
+        if (loop_file) {
+          yuv_file.clear();
+          yuv_file.seekg(0, std::ios::beg);
+          continue;
+        }
+        return false;
       }
-    } else {
-      for (size_t j = 0; j < y_sz; j += 2)
-        *(uint16_t*)(y_buf.data() + j) = (uint16_t)(((j/2 + i) % 1024) << 6);
-      std::fill(u_buf.begin(), u_buf.end(), 0);
-      std::fill(v_buf.begin(), v_buf.end(), 0);
+      yuv_file.read((char*)y_buf.data(), y_sz);
+      yuv_file.read((char*)u_buf.data(), uv_sz);
+      yuv_file.read((char*)v_buf.data(), uv_sz);
+      if (yuv_file) return true;
+      if (loop_file) {
+        yuv_file.clear();
+        yuv_file.seekg(0, std::ios::beg);
+        continue;
+      }
+      return false;
     }
+  };
+
+  if (infinite_run) {
+    std::cout << "Loop send: --duration 0 with --loop and --url, run until Ctrl+C\n";
+  } else if (loop_file && from_file) {
+    std::cout << "Loop send: rewind YUV file at EOF until duration ends\n";
+  }
+
+  // Prefill: push first prefill_frames without pacing to fill TX ring (reduces early build timeout)
+  const int64_t prefill = std::min<int64_t>(prefill_frames, max_video_frames);
+  for (int64_t i = 0; i < prefill; i++) {
+    frame.timestamp_ns = ptp_valid ? ctx->now_ptp_ns() : (int64_t)i * frame_ns;
+    if (!load_yuv_frame(i)) break;
     if (!v_tx->put_video(frame)) break;
   }
   if (prefill > 0) {
     std::cout << "Prefilled " << prefill << " frame(s) into TX ring\n";
   }
 
-  int last_put_frame = -1;
-  for (int i = prefill; i < total_video_frames; i++) {
+  int64_t last_put_frame = -1;
+  for (int64_t i = prefill; i < max_video_frames; i++) {
     frame.timestamp_ns = ptp_valid ? ctx->now_ptp_ns() : (int64_t)i * frame_ns;
 
-    if (from_file) {
-      if (use_yuv420) {
-        const size_t y_read = y_sz;
-        const size_t u420_sz = (size_t)(width / 2) * (height / 2) * 2;
-        const size_t v420_sz = u420_sz;
-        std::vector<uint8_t> u420(u420_sz), v420(v420_sz);
-        yuv_file.read((char*)y_buf.data(), y_read);
-        yuv_file.read((char*)u420.data(), u420_sz);
-        yuv_file.read((char*)v420.data(), v420_sz);
-        if (!yuv_file || (size_t)yuv_file.gcount() < v420_sz)
-          break;
-        yuv420p10le_to_yuv422p10le(width, height,
-            y_buf.data(), u420.data(), v420.data(),
-            y_buf.data(), u_buf.data(), v_buf.data());
-      } else {
-        yuv_file.read((char*)y_buf.data(), y_sz);
-        yuv_file.read((char*)u_buf.data(), uv_sz);
-        yuv_file.read((char*)v_buf.data(), uv_sz);
-        if (!yuv_file) break;
-      }
-    } else {
-      for (size_t j = 0; j < y_sz; j += 2)
-        *(uint16_t*)(y_buf.data() + j) = (uint16_t)(((j/2 + i) % 1024) << 6);
-      std::fill(u_buf.begin(), u_buf.end(), 0);
-      std::fill(v_buf.begin(), v_buf.end(), 0);
-    }
+    if (!load_yuv_frame(i)) break;
 
     bool put_ok = false;
     if (put_retry > 0) {
@@ -322,7 +335,7 @@ int main(int argc, char** argv) {
     }
     last_put_frame = i;
 
-    if (a_tx && audio_chunks_sent < audio_chunks_total) {
+    if (a_tx && audio_chunks_total > 0 && audio_chunks_sent < audio_chunks_total) {
       int chunks_this_frame = (int)((i + 1) * samples_per_audio_chunk * 2 / 48000.0) - audio_chunks_sent;
       for (int c = 0; c < chunks_this_frame && audio_chunks_sent < audio_chunks_total; c++) {
         mtl_sdk::AudioFrame af;
@@ -344,7 +357,7 @@ int main(int argc, char** argv) {
   }
 
   ctx->stop();
-  int frames_sent = (last_put_frame >= 0) ? (last_put_frame + 1) : prefill;
+  int64_t frames_sent = (last_put_frame >= 0) ? (last_put_frame + 1) : prefill;
   std::cout << "Sent " << frames_sent << " video frames to " << ip << ":" << video_port;
   if (a_tx) std::cout << ", " << audio_chunks_sent << " audio chunks to " << ip << ":" << audio_port;
   std::cout << "\n";

@@ -1,9 +1,9 @@
 {
-  "receiver_id": "751484ba-6141-40da-9b93-d60f108e2c74",
-  "master_enable": true,
+  "receiver_id": "a213c8e8-1e61-485e-985a-470cad0927ce",
+  "master_enable": false,
   "sender_id": null,
   "video": {
-    "ip": "0.0.0.0",
+    "ip": "239.0.0.1",
     "udp_port": 5004,
     "payload_type": 96,
     "width": 1920,

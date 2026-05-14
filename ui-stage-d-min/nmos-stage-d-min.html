@@ -1,0 +1,362 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>NMOS Stage D 最小版</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 16px; color: #222; }
+    .topbar { margin-bottom: 12px; }
+    .topbar input { width: 430px; }
+    .graph-wrap { position: relative; }
+    .layout { display: grid; grid-template-columns: 320px 1fr 360px; gap: 12px; align-items: start; position: relative; z-index: 1; }
+    .edge-overlay { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 2; }
+    .panel { border: 1px solid #ddd; border-radius: 8px; background: #fff; }
+    .panel h3 { margin: 0; padding: 10px 12px; border-bottom: 1px solid #eee; font-size: 15px; }
+    .list { max-height: 560px; overflow: auto; padding: 10px; }
+    /* 固定卡片结构：Sender/Receiver 行数一致 + UUID 单行省略，避免连接后换行撑高导致连线端口偏移 */
+    .node { border: 1px solid #e8e8e8; border-radius: 8px; padding: 8px; margin-bottom: 8px; cursor: pointer; background: #fafafa; position: relative; min-height: 112px; box-sizing: border-box; }
+    .node.selected { border-color: #36a853; background: #eefcf1; }
+    .handle { position: absolute; top: 50%; transform: translateY(-50%); width: 10px; height: 10px; border-radius: 50%; border: 2px solid #fff; box-shadow: 0 0 0 1px #a0a0a0; background: #5f6368; }
+    .handle.sender { right: -6px; }
+    .handle.receiver { left: -6px; }
+    .name { font-weight: 600; }
+    .meta-row { font-size: 12px; color: #666; margin-top: 2px; line-height: 1.35; min-height: 1.35em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+    .meta-row.mono { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; letter-spacing: -0.02em; }
+    .meta-row.placeholder-meta { visibility: hidden; user-select: none; pointer-events: none; }
+    .actions { margin-top: 6px; height: 26px; display: flex; align-items: center; gap: 6px; }
+    .actions.placeholder { visibility: hidden; }
+    .canvas { position: relative; height: 582px; overflow: auto; background: linear-gradient(180deg, #fcfcfc, #f7f7f7); }
+    .dot { width: 10px; height: 10px; border-radius: 50%; background: #9aa0a6; display: inline-block; margin-left: 8px; }
+    .dot.on { background: #2e7d32; }
+    .btn { margin-right: 6px; }
+    pre { background: #fafafa; border: 1px solid #eee; border-radius: 6px; padding: 8px; min-height: 110px; max-height: 240px; overflow: auto; }
+    .hint { font-size: 12px; color: #666; margin: 8px 0; }
+  </style>
+</head>
+<body>
+  <h2>NMOS 节点+连线（阶段 D 最小版）</h2>
+  <div class="topbar">
+    Query API:
+    <input id="queryBase" value="http://192.168.1.200/x-nmos/query/v1.3" />
+    <button class="btn" id="btnRefresh">刷新</button>
+    <button class="btn" id="btnClearPick">清空 Sender 选择</button>
+  </div>
+  <div class="hint">操作：先点左侧 Sender，再点右侧 Receiver 建线；点击 Receiver 的“断开”执行 disconnect。</div>
+
+  <div class="graph-wrap" id="graphWrap">
+    <svg class="edge-overlay" id="edgeSvg"></svg>
+    <div class="layout">
+      <div class="panel">
+        <h3>Senders</h3>
+        <div class="list" id="senderList"></div>
+      </div>
+
+      <div class="panel canvas">
+        <div style="padding: 12px; color: #666; font-size: 13px;">
+          连线会根据左右节点卡片上的端口自动绘制。<br />
+          连接关系来源于 Receiver active 的 sender_id。
+        </div>
+      </div>
+
+      <div class="panel">
+        <h3>Receivers</h3>
+        <div class="list" id="receiverList"></div>
+        <h3>日志</h3>
+        <div style="padding:10px;">
+          <pre id="log"></pre>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const state = {
+      senders: [],
+      receivers: [],
+      selectedSenderId: null,
+      pollTimer: null,
+    };
+
+    function getQueryBase() {
+      return document.getElementById("queryBase").value.trim().replace(/\/$/, "");
+    }
+
+    function log(msg, isErr = false) {
+      const el = document.getElementById("log");
+      const line = `[${new Date().toLocaleTimeString()}] ${msg}\n`;
+      el.innerHTML += isErr ? `<span style="color:#c33">${line}</span>` : line;
+      el.scrollTop = el.scrollHeight;
+    }
+
+    async function getJson(url, errPrefix) {
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`${errPrefix}: ${res.status}`);
+      return await res.json();
+    }
+
+    async function inferNodeBase(resource) {
+      if (resource._nodeBase) return resource._nodeBase;
+      if (resource.href) {
+        resource._nodeBase = resource.href.replace(/\/$/, "");
+        return resource._nodeBase;
+      }
+      if (!resource.device_id) throw new Error(`资源 ${resource.id} 缺少 href/device_id`);
+
+      const queryBase = getQueryBase();
+      const dev = await getJson(`${queryBase}/devices/${resource.device_id}`, `获取device失败(${resource.device_id})`);
+      const nodeId = dev.node_id;
+      if (!nodeId) throw new Error(`device ${resource.device_id} 缺少 node_id`);
+      const node = await getJson(`${queryBase}/nodes/${nodeId}`, `获取node失败(${nodeId})`);
+      if (!node.href) throw new Error(`node ${nodeId} 缺少 href`);
+
+      resource._nodeBase = node.href.replace(/\/$/, "");
+      return resource._nodeBase;
+    }
+
+    async function listSenders() {
+      return await getJson(`${getQueryBase()}/senders`, "listSenders失败");
+    }
+
+    async function listReceivers() {
+      return await getJson(`${getQueryBase()}/receivers`, "listReceivers失败");
+    }
+
+    async function getReceiverActive(receiver) {
+      const base = await inferNodeBase(receiver);
+      return await getJson(
+        `${base}/x-nmos/connection/v1.1/single/receivers/${receiver.id}/active`,
+        `读取active失败(${receiver.id})`
+      );
+    }
+
+    async function connect(senderId, receiverId) {
+      const sender = state.senders.find(s => s.id === senderId);
+      const receiver = state.receivers.find(r => r.id === receiverId);
+      if (!sender || !receiver) throw new Error("sender/receiver 不存在");
+
+      const senderNode = await inferNodeBase(sender);
+      const receiverNode = await inferNodeBase(receiver);
+      const tfRes = await fetch(`${senderNode}/x-nmos/connection/v1.1/single/senders/${senderId}/transportfile`);
+      if (!tfRes.ok) throw new Error(`transportfile失败: ${tfRes.status}`);
+      const sdp = await tfRes.text();
+      if (!sdp.trim()) throw new Error("transportfile为空");
+
+      const body = {
+        sender_id: senderId,
+        master_enable: true,
+        activation: { mode: "activate_immediate" },
+        transport_file: { type: "application/sdp", data: sdp }
+      };
+      const patchRes = await fetch(
+        `${receiverNode}/x-nmos/connection/v1.1/single/receivers/${receiverId}/staged`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        }
+      );
+      if (!patchRes.ok) throw new Error(`PATCH staged失败: ${patchRes.status}`);
+      return await patchRes.json();
+    }
+
+    async function disconnect(receiverId) {
+      const receiver = state.receivers.find(r => r.id === receiverId);
+      if (!receiver) throw new Error("receiver 不存在");
+      const receiverNode = await inferNodeBase(receiver);
+
+      const body = {
+        master_enable: false,
+        sender_id: null,
+        activation: { mode: "activate_immediate" }
+      };
+      const patchRes = await fetch(
+        `${receiverNode}/x-nmos/connection/v1.1/single/receivers/${receiverId}/staged`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        }
+      );
+      if (!patchRes.ok) throw new Error(`disconnect失败: ${patchRes.status}`);
+      return await patchRes.json();
+    }
+
+    function scheduleEdgeRender() {
+      if (state._edgeRenderPending) return;
+      state._edgeRenderPending = true;
+      requestAnimationFrame(() => {
+        state._edgeRenderPending = false;
+        renderEdges();
+      });
+    }
+
+    function renderLists() {
+      const senderList = document.getElementById("senderList");
+      const receiverList = document.getElementById("receiverList");
+      senderList.innerHTML = "";
+      receiverList.innerHTML = "";
+
+      state.senders.forEach((s, i) => {
+        const div = document.createElement("div");
+        div.id = `sender-${s.id}`;
+        div.className = "node" + (state.selectedSenderId === s.id ? " selected" : "");
+        div.style.marginTop = i === 0 ? "0" : "8px";
+        div.innerHTML = `
+          <span class="handle sender" data-handle="sender"></span>
+          <div class="name">${s.label || "Unnamed Sender"} <span class="dot ${state.selectedSenderId === s.id ? "on" : ""}"></span></div>
+          <div class="meta-row mono" title="${s.id}">${s.id}</div>
+          <div class="meta-row mono placeholder-meta" aria-hidden="true">active.sender_id: —</div>
+          <div class="actions placeholder">
+            <button class="btn">占位</button>
+            <button class="btn">占位</button>
+          </div>
+        `;
+        div.onclick = () => {
+          state.selectedSenderId = state.selectedSenderId === s.id ? null : s.id;
+          render();
+        };
+        senderList.appendChild(div);
+      });
+
+      state.receivers.forEach((r, i) => {
+        const div = document.createElement("div");
+        div.id = `receiver-${r.id}`;
+        div.className = "node";
+        div.style.marginTop = i === 0 ? "0" : "8px";
+        const activeSender = r._active?.sender_id ?? "null";
+        const activeTitle = `active.sender_id: ${activeSender}`;
+        div.innerHTML = `
+          <span class="handle receiver" data-handle="receiver"></span>
+          <div class="name">${r.label || "Unnamed Receiver"}</div>
+          <div class="meta-row mono" title="${r.id}">${r.id}</div>
+          <div class="meta-row mono" title="${activeTitle}">${activeTitle}</div>
+          <div class="actions">
+            <button class="btn" data-connect>连接到已选Sender</button>
+            <button class="btn" data-disconnect>断开</button>
+          </div>
+        `;
+        div.querySelector("[data-connect]").onclick = async (e) => {
+          e.stopPropagation();
+          try {
+            if (!state.selectedSenderId) throw new Error("请先选中 Sender");
+            await connect(state.selectedSenderId, r.id);
+            log(`连接成功: ${state.selectedSenderId} -> ${r.id}`);
+            await refreshActiveOnly();
+            render();
+          } catch (err) {
+            log(`连接失败: ${err.message}`, true);
+          }
+        };
+        div.querySelector("[data-disconnect]").onclick = async (e) => {
+          e.stopPropagation();
+          try {
+            await disconnect(r.id);
+            log(`断开成功: receiver=${r.id}`);
+            await refreshActiveOnly();
+            render();
+          } catch (err) {
+            log(`断开失败: ${err.message}`, true);
+          }
+        };
+        // 点击 receiver 卡片，触发“已选 sender -> receiver”快捷连接
+        div.onclick = async () => {
+          if (!state.selectedSenderId) return;
+          try {
+            await connect(state.selectedSenderId, r.id);
+            log(`连接成功(快捷): ${state.selectedSenderId} -> ${r.id}`);
+            await refreshActiveOnly();
+            render();
+          } catch (err) {
+            log(`连接失败: ${err.message}`, true);
+          }
+        };
+        receiverList.appendChild(div);
+      });
+      scheduleEdgeRender();
+    }
+
+    function renderEdges() {
+      const svg = document.getElementById("edgeSvg");
+      const graphWrap = document.getElementById("graphWrap");
+      const wrapRect = graphWrap.getBoundingClientRect();
+      const width = Math.max(Math.round(wrapRect.width), 760);
+      const height = Math.max(Math.round(wrapRect.height), 560);
+      svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+      svg.innerHTML = "";
+
+      state.receivers.forEach((r) => {
+        const sid = r._active?.sender_id;
+        if (!sid) return;
+        const senderCard = document.getElementById(`sender-${sid}`);
+        const receiverCard = document.getElementById(`receiver-${r.id}`);
+        if (!senderCard || !receiverCard) return;
+        const senderHandle = senderCard.querySelector('[data-handle="sender"]');
+        const receiverHandle = receiverCard.querySelector('[data-handle="receiver"]');
+        if (!senderHandle || !receiverHandle) return;
+
+        const sRect = senderHandle.getBoundingClientRect();
+        const rRect = receiverHandle.getBoundingClientRect();
+        const x1 = sRect.left + sRect.width / 2 - wrapRect.left;
+        const y1 = sRect.top + sRect.height / 2 - wrapRect.top;
+        const x2 = rRect.left + rRect.width / 2 - wrapRect.left;
+        const y2 = rRect.top + rRect.height / 2 - wrapRect.top;
+        /* 两端垂直略有偏差时强制水平线段，避免“歪线”观感 */
+        const yMid = (y1 + y2) / 2;
+        const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
+        line.setAttribute("x1", String(x1));
+        line.setAttribute("y1", String(yMid));
+        line.setAttribute("x2", String(x2));
+        line.setAttribute("y2", String(yMid));
+        line.setAttribute("stroke", "#1a73e8");
+        line.setAttribute("stroke-width", "3");
+        line.setAttribute("stroke-linecap", "round");
+        svg.appendChild(line);
+      });
+    }
+
+    async function refreshActiveOnly() {
+      await Promise.all(state.receivers.map(async (r) => {
+        try {
+          r._active = await getReceiverActive(r);
+        } catch {
+          r._active = null;
+        }
+      }));
+    }
+
+    async function refreshAll() {
+      try {
+        state.senders = await listSenders();
+        state.receivers = await listReceivers();
+        await refreshActiveOnly();
+        render();
+        log(`刷新完成: senders=${state.senders.length}, receivers=${state.receivers.length}`);
+      } catch (err) {
+        log(`刷新失败: ${err.message}`, true);
+      }
+    }
+
+    function render() {
+      renderLists();
+      scheduleEdgeRender();
+    }
+
+    document.getElementById("btnRefresh").onclick = refreshAll;
+    document.getElementById("btnClearPick").onclick = () => {
+      state.selectedSenderId = null;
+      render();
+    };
+
+    refreshAll();
+    state.pollTimer = setInterval(async () => {
+      await refreshActiveOnly();
+      scheduleEdgeRender();
+    }, 8000);
+
+    window.addEventListener("resize", scheduleEdgeRender);
+    document.getElementById("senderList").addEventListener("scroll", scheduleEdgeRender);
+    document.getElementById("receiverList").addEventListener("scroll", scheduleEdgeRender);
+  </script>
+</body>
+</html>
