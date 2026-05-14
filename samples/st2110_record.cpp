@@ -12,6 +12,41 @@
 #include <iomanip>
 #include <iostream>
 #include <thread>
+#include <cstring>
+#include <algorithm>
+
+static std::string to_lower(std::string s) {
+  std::transform(s.begin(), s.end(), s.begin(),
+                 [](unsigned char c) { return char(std::tolower(c)); });
+  return s;
+}
+
+static encode_sdk::VideoCodec parse_video_codec(const std::string& s) {
+  std::string v = to_lower(s);
+  if (v == "h265" || v == "hevc") return encode_sdk::VideoCodec::H265;
+  return encode_sdk::VideoCodec::H264;
+}
+
+static encode_sdk::AudioCodec parse_audio_codec(const std::string& s) {
+  std::string v = to_lower(s);
+  if (v == "aac") return encode_sdk::AudioCodec::AAC;
+  if (v == "mp2") return encode_sdk::AudioCodec::MP2;
+  if (v == "pcm") return encode_sdk::AudioCodec::PCM;
+  if (v == "ac3") return encode_sdk::AudioCodec::AC3;
+  return encode_sdk::AudioCodec::AAC;
+}
+
+static encode_sdk::Container parse_container(const std::string& s) {
+  std::string v = to_lower(s);
+  if (v == "mxf") return encode_sdk::Container::MXF;
+  return encode_sdk::Container::MP4;
+}
+
+static encode_sdk::HwAccel parse_hw(const std::string& s) {
+  std::string v = to_lower(s);
+  if (v == "sw" || v == "software") return encode_sdk::HwAccel::Software;
+  return encode_sdk::HwAccel::Auto;
+}
 
 static void usage(const char* prog) {
   std::cerr << "Usage: " << prog << " [options] [output.mp4]\n"
@@ -26,6 +61,13 @@ static void usage(const char* prog) {
             << "  --max-frames <n>        Stop after N video frames (default: 600)\n"
             << "  --no-ptp                Disable PTP, use synthetic timestamps (fallback when NIC lacks PTP)\n"
             << "  --sdp <file>            Load SDP file to derive IP/ports/format (overrides --ip/--video-port/--audio-port/--width/--height/--fps)\n"
+            << "  --vcodec <h264|h265>    Video codec (default: h264)\n"
+            << "  --acodec <aac|mp2|pcm|ac3>  Audio codec (default: aac)\n"
+            << "  --container <mp4|mxf>   Output container (default: mp4)\n"
+            << "  --vbitrate <kbps>       Video bitrate in kbps (default: 2000)\n"
+            << "  --abitrate <kbps>       Audio bitrate in kbps (default: 128)\n"
+            << "  --gop <n>               GOP size in frames (default: 120)\n"
+            << "  --hw <auto|sw>          Hardware encode: auto or software (default: auto)\n"
             << "  --lcores <list>         DPDK lcores for MTL, e.g. 0-3 or 2,3,4,5 (faster RX)\n"
             << "  --main-lcore <id>       Main lcore id (default: MTL auto)\n"
             << "  --tasklets <n>          Tasklets per lcore; 0=auto (try 16 if slow)\n"
@@ -69,6 +111,13 @@ int main(int argc, char** argv) {
   uint32_t min_unprocessed_slices = 0;
   bool enable_decode = false;
   bool show_progress = false;
+  std::string vcodec_str = "h264";
+  std::string acodec_str = "aac";
+  std::string container_str = "mp4";
+  std::string hw_str = "auto";
+  int vbitrate_kbps = 2000;
+  int abitrate_kbps = 128;
+  int gop = 120;
 
   for (int i = 1; i < argc; i++) {
     std::string a = argv[i];
@@ -85,6 +134,13 @@ int main(int argc, char** argv) {
     if (a == "--decode") { enable_decode = true; continue; }
     if (a == "--progress") { show_progress = true; continue; }
     if (a == "--sdp" && i + 1 < argc) { sdp_path = argv[++i]; continue; }
+    if (a == "--vcodec" && i + 1 < argc) { vcodec_str = argv[++i]; continue; }
+    if (a == "--acodec" && i + 1 < argc) { acodec_str = argv[++i]; continue; }
+    if (a == "--container" && i + 1 < argc) { container_str = argv[++i]; continue; }
+    if (a == "--vbitrate" && i + 1 < argc) { vbitrate_kbps = atoi(argv[++i]); continue; }
+    if (a == "--abitrate" && i + 1 < argc) { abitrate_kbps = atoi(argv[++i]); continue; }
+    if (a == "--gop" && i + 1 < argc) { gop = atoi(argv[++i]); continue; }
+    if (a == "--hw" && i + 1 < argc) { hw_str = argv[++i]; continue; }
     if (a == "--lcores" && i + 1 < argc) { lcores = argv[++i]; continue; }
     if (a == "--main-lcore" && i + 1 < argc) { main_lcore = atoi(argv[++i]); continue; }
     if (a == "--tasklets" && i + 1 < argc) { tasklets_nb_per_sch = (uint32_t)atoi(argv[++i]); continue; }
@@ -232,20 +288,20 @@ int main(int argc, char** argv) {
     store = frame_store::RingSliceStore::open(cfg, vf, audio_store_format ? &*audio_store_format : nullptr);
   }
 
-  // ---- Encoding SDK: Auto hw (NVENC->QSV->CPU), lower load for stability ----
+  // ---- Encoding SDK (decode path): codec/container from CLI ----
   std::unique_ptr<encode_sdk::Session> enc;
   frame_transport::ReceiverToSinkAdapter rx_adapter;
   frame_transport::BoundedFrameQueue enc_queue(64);
   std::thread enc_thread;
   if (decode_mode) {
     encode_sdk::EncodeParams ep;
-    ep.mux.container = encode_sdk::Container::MP4;
+    ep.mux.container = parse_container(container_str);
     ep.mux.output_path = out;
 
-    ep.video.codec = encode_sdk::VideoCodec::H264;
-    ep.video.hw = encode_sdk::HwAccel::Auto;
-    ep.video.bitrate_kbps = 2000;
-    ep.video.gop = 120;
+    ep.video.codec = parse_video_codec(vcodec_str);
+    ep.video.hw = parse_hw(hw_str);
+    ep.video.bitrate_kbps = vbitrate_kbps;
+    ep.video.gop = gop;
     ep.video.profile = "main";
     ep.video.fps_num = (int)(fps + 0.5);
     ep.video.fps_den = 1;
@@ -253,10 +309,10 @@ int main(int argc, char** argv) {
 
     if (audio_port != 0) {
       ep.audio = encode_sdk::AudioEncodeParams{};
-      ep.audio->codec = encode_sdk::AudioCodec::AAC;
-      ep.audio->bitrate_kbps = 128;
-      ep.audio->sample_rate = 48000;
-      ep.audio->channels = 2;
+      ep.audio->codec = parse_audio_codec(acodec_str);
+      ep.audio->bitrate_kbps = abitrate_kbps;
+      ep.audio->sample_rate = audio_sample_rate;
+      ep.audio->channels = audio_channels;
     } else {
       ep.audio = std::nullopt;
     }
